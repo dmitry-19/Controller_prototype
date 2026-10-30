@@ -17,7 +17,7 @@
 //                     ├──► BalanceSystem (ЦМ над опорой + вертикализация таза)
 //                     ├──► ReactionSystem  (удар → limp/stress-волна по иерархии, stagger, head)
 //                     ├──► RagdollManager  (потеря стабильности → falling/getup с гистерезисом)
-//                     ├──► FootIK          (ступни читают поверхность рейкастами, BoneIKController)
+//                     ├──► MasterFootSystem (two-bone IK v71 + predictive landing 1c9eff + spring-contact)
 //                     └──► SpineIK / Look  (BoneLookController, вес = followingScale)
 //                     ▼
 //                  SkinningSync (мировые матрицы физ. тел → локальные трансформы костей скинета)
@@ -51,6 +51,24 @@ const lerpF = (a, b, t) => a + (b - a) * t;
 const smoothstep = (a, b, x) => { const t = clampF((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 // frame-rate independent damping (идея обоих DeepSeek-прототипов): коэффициент за кадр
 const dampF = (dt, tau) => 1 - Math.exp(-dt / Math.max(0.001, tau));
+
+// --------------------------------------------------------------------------- скалярный math-слой
+// (перенос 1-в-1 из deepseek_html_20261028_644a29.html: LN2 / fastNegExp / decaySpring —
+//  инерционный spring-контакт стопы; и из deepseek_html_20261028_1c9eff.html: smoothstep01)
+const LN2 = 0.69314718056;
+const fastNegExp = (x) => 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+// критически демпфированная пружина с «полураспадом» hl (decaySpringToRef, без аллокаций)
+function decaySpringToRef(x, v, hl, dt, outX, outV) {
+    const y = (4 * LN2 / (hl + 1e-5)) / 2;
+    const j1x = v.x + x.x * y, j1y = v.y + x.y * y, j1z = v.z + x.z * y;
+    const e = fastNegExp(y * dt);
+    const nydt = y * dt;
+    outX.set(x.x + j1x * dt, x.y + j1y * dt, x.z + j1z * dt);
+    outX.scaleInPlace(e);
+    outV.set(v.x - j1x * nydt, v.y - j1y * nydt, v.z - j1z * nydt);
+    outV.scaleInPlace(e);
+}
+const smoothstep01 = (t) => { t = clampF(t, 0, 1); return t * t * (3 - 2 * t); };
 
 function smoothDampAngle(cur, tgt, dt, smoothTime) {
     let d = tgt - cur;
@@ -104,6 +122,7 @@ export const DEFAULT_PARAMS = {
     ikEnabled: true, ikFootLift: 0.05, ikSlerp: 0.9,
 
     // ===== Master layer: ideas from deepseek_html_20261028_1c9eff.html =====
+    masterBlendTau: 0.05,           // τ сглаживания blend опоры стопы (rawBlend → blendSmooth)
     predictive: true,               // предиктивная посадка стопы (predictLandingXZ)
     predRadius: 0.22,               // радиус 8-лучевого поиска опоры вокруг точки прицела
     predMaxOffset: 0.30,            // максимальный сдвиг точки прицела от «анимационной» стопы
@@ -584,106 +603,637 @@ class MasterController {
 }
 
 // =================================================================================================
-//  FOOT IK — ступни читают поверхность (рейкасты) и держат контакт; BoneIKController на голени.
-//  Идеи: ikSystem.js (raycast-поиск поверхности, pole target, lerp цели) + prototype support reading.
-//  Вес IK автоматически снижается, когда стопа реально стоит на опоре (контакт подтверждён физикой),
-//  и поднимается при рассогласовании анимации и рельефа — это часть логики смешения весов.
+//  MASTER FOOT SYSTEM — полноценный мастер-слой ног, интегрированный из двух DeepSeek-прототипов:
+//
+//  deepseek_html_20261028_644a29.html (Controller v71):
+//   • contactUpdate / decaySpringVec3 / inerTransVec3 — инерционный spring-контакт стопы:
+//     при касании точки lock (позиция фиксируется, offset переносится), при отрыве offset
+//     «сбрасывается» через decay-spring — стопа плавно доезжает до новой позиции без рывков.
+//   • ikTwoBone — аналитический two-bone IK (кватернионные поправки бедра/голени) с nlerp-смесью
+//     по plant-весу; реализация перенесена 1-в-1 (скалярный math-слой).
+//   • идеология applyWeights: плавные веса (fade-in/out), смешивание с idle, snap на переход.
+//
+//  deepseek_html_20261028_1c9eff.html (predictive landing XZ · stable):
+//   • калибровочный профиль клипа (restAnkleOffset/minAnkleY/swingAmp/ballRestOffset/restGroundY)
+//     → rawBlend = 1 − (ankleY − minAnkleY)/swingAmp, т.е. «насколько стопа ушла в опору»;
+//     профили подхватываются из ik_calibration_<model>.json или считаются онлайном (batch-calib).
+//   • predictLandingXZ — предиктивная посадка: экстраполяция XZ по скорости корня на время
+//     переноса, 8-лучевой поиск вверх-уступа (predRadius/predRaiseThreshold), лимин offsets
+//     (predMaxOffset), гистерезис прилипания (predHysteresis), soft-commit (predCommitBlend)
+//     и hard-lock (predLockBlend/predLockExit) с τ-сглаживанием XZ/Y.
+//   • computeInfl — смешение XZ-цели анимации с landing-точкой (predInfluence → predInfluenceAtPlant).
+//   • orientFootFromToe — итеративный зонд носка (FOOT_PROBE_ITERS) + pitch-доворот стопы так,
+//     чтобы подушечка (ball) стояла на рельефе без проникновения (toePenetr).
+//   • компенсация таза: pelvisDeltaY = min по посаженным стопам (heelY − restGroundY), τ-сглаживание.
+//   • GAIT_SPEED_K — пульс скорости мастера по фазе шага.
+//
+//  ЛОГИКА СМЕШЕНИЯ ВЕСОВ (мастер-слой): итоговый вес ноги =
+//      ikWeight = blendSmooth (профиль) × followingScale (стабильность/ragdoll)
+//                 × (1 − ragdollActive) × staggerCoef
+//  — в ragdoll IK обнуляется и не мешает физике; при оглушении частично ослабевает.
+//  (каскад slave-PD-весов описан в _updateStability/_followAnimation ниже)
 // =================================================================================================
-class FootIK {
+class MasterFootSystem {
     constructor(cc) {
         this.cc = cc;
-        this.targets = { left: null, right: null };
-        this.controllers = { left: null, right: null };
-        this.weights = { left: 0, right: 0 };
-        this.smoothY = { left: null, right: null };
         this.enabled = false;
+        this.legs = {};                       // sideKey ('L'/'R') → состояние ноги
+        this.profiles = new Map();            // animName → calibration profile
+        this.defaultProfile = null;
+        this.activeAnimName = '';
+        this._calib = null;                   // онлайн-калибровка одного клипа
+        this._batch = null;                   // очередь batch-calibration
+        this.pelvisDeltaY = 0;
+        this.pelvisDeltaYSmooth = 0;
+        this._rootVel = new BABYLON.Vector3();
+        this._rootVelSmooth = new BABYLON.Vector3();
+        this._lastRootPos = null;
+        this._scratchA = new BABYLON.Vector3();
+        this._scratchB = new BABYLON.Vector3();
     }
 
+    // ------------------------------------------------------------------ сборка
     setup() {
         const cc = this.cc;
-        // Создаём IK-цепочки только если они явно включены (options.ik.enabled либо params.ikEnabled)
         const ikOn = (cc.options.ik && cc.options.ik.enabled !== undefined)
             ? !!cc.options.ik.enabled : !!cc.params.ikEnabled;
         if (!ikOn) return;
         if (!cc.skinnedMesh || !cc.skelRef) return;
-        for (const side of ['left', 'right']) {
-            const footRef = cc.colliderRefs.find(r => r.isFootWeld && new RegExp(side === 'left' ? '_l|left' : '_r|right', 'i').test(r.name));
+
+        for (const sideKey of ['L', 'R']) {
+            const re = sideKey === 'L' ? /_l$|left|\.l$/i : /_r$|right|\.r$/i;
+            const footRef = cc.colliderRefs.find(r => r.isFootWeld && re.test(r.name));
             if (!footRef) continue;
-            const legRef = footRef.parentRef; // calf — родитель сваренной стопы
-            if (!legRef || legRef.jt !== 'knee') continue;
-            const target = new BABYLON.TransformNode(`cc_foot_target_${side}`, cc.scene);
-            this.targets[side] = target;
-            try {
-                const ctrl = new BABYLON.BoneIKController(cc.skinnedMesh, legRef.bone, {
-                    targetMesh: target,
-                    poleTargetBone: legRef.parentRef ? legRef.parentRef.bone : legRef.bone,
-                    poleAngle: 0,
-                    bendAxis: new BABYLON.Vector3(1, 0, 0),
-                    slerpAmount: cc.params.ikSlerp,
-                });
-                this.controllers[side] = ctrl;
-                this.enabled = true;
-            } catch (e) {
-                console.warn('[CharacterController] FootIK не создан для', side, e);
-            }
+            const shinRef = footRef.parentRef;                 // calf
+            const thighRef = shinRef ? shinRef.parentRef : null; // thigh
+            if (!thighRef) continue;
+            const skel = cc.skelRef;
+            const findBone = (names) => {
+                for (const n of names) {
+                    const b = skel.bones.find(x => x.name.toLowerCase() === n.toLowerCase());
+                    if (b) return b;
+                }
+                return null;
+            };
+            const suffix = sideKey === 'L' ? '_l' : '_r';
+            const thigh = findBone(['upperleg' + suffix, 'thigh' + suffix, 'upper_leg' + suffix, 'UpLeg.' + sideKey]) || thighRef.bone;
+            const shin = findBone(['lowerleg' + suffix, 'calf' + suffix, 'shin' + suffix, 'Leg.' + sideKey]) || shinRef.bone;
+            const foot = findBone(['foot' + suffix, 'ankle' + suffix, 'Ball' + suffix, 'Foot.' + sideKey]) || footRef.bone;
+            const ball = findBone(['ball' + suffix, 'toebase' + suffix, 'Ball.' + sideKey]);
+            const par = thigh.getParent();
+
+            this.legs[sideKey] = {
+                sideKey, thigh, shin, foot, ball,
+                pelvis: par || thigh,
+                lengths: [],                     // |thigh→shin|, |shin→foot| (rest)
+                contact: this.makeContactState(),
+                plant: 0,                        // демпфированный целевой вес посадки
+                blendSmooth: 0,                  // blend из профиля (сглаженный)
+                toeGroundYSmooth: null,
+                toePenetr: 0, appliedPitchDeg: 0,
+                prevFootPos: null,
+                landing: this.mkLanding(),
+                lastIkTarget: null,
+            };
+            const L = this.legs[sideKey];
+            thigh.computeWorldMatrix(true); shin.computeWorldMatrix(true); foot.computeWorldMatrix(true);
+            L.lengths = [
+                BABYLON.Vector3.Distance(thigh.getAbsolutePosition(), shin.getAbsolutePosition()),
+                BABYLON.Vector3.Distance(shin.getAbsolutePosition(), foot.getAbsolutePosition()),
+            ];
         }
+        this.enabled = Object.keys(this.legs).length > 0;
+        if (!this.enabled) return;
+
+        // Профили калибровки: экспорт первого DeepSeek-прототипа («Predictive Landing»)
+        this.loadProfiles(cc.options.calibration);
+        if (cc.options.autoCalibrate !== false) this.startBatchCalibration();
     }
 
-    update(dt) {
+    loadProfiles(data) {
+        if (!data) return Promise.resolve();
+        const apply = (obj) => {
+            if (!obj || !obj.profiles) return;
+            for (const [name, p] of Object.entries(obj.profiles)) {
+                if (typeof p.restAnkleOffsetL !== 'number') continue;
+                this.profiles.set(name, p);
+            }
+            this.defaultProfile = this.profiles.get('Walk') || this.profiles.values().next().value || null;
+        };
+        if (typeof data === 'string') {
+            return fetch(data).then(r => r.json()).then(apply).catch(() => {});
+        }
+        apply(data);
+        return Promise.resolve();
+    }
+
+    // ------------------------------------------------------------------ контакт стопы (v71)
+    makeContactState() {
+        return { state: false, lock: false, position: new BABYLON.Vector3(), velocity: new BABYLON.Vector3(), point: new BABYLON.Vector3(), target: new BABYLON.Vector3(), offsetPosition: new BABYLON.Vector3(), offsetVelocity: new BABYLON.Vector3() };
+    }
+    // contactUpdate из v71: inState=касание → lock точки (y=footHeight), offset-перенос;
+    // выход из касания/рассогласование > ur → unlock; position = source + decay-spring(offset)
+    contactUpdate(cs, inPos, inState, ur, footHeightY, hl, dt) {
+        const eps = 1e-8;
+        const tmpX = this.cc._mfsTx || (this.cc._mfsTx = new BABYLON.Vector3());
+        const tmpV = this.cc._mfsTv || (this.cc._mfsTv = new BABYLON.Vector3());
+        cs.velocity.set((inPos.x - cs.target.x) / (dt + eps), (inPos.y - cs.target.y) / (dt + eps), (inPos.z - cs.target.z) / (dt + eps));
+        cs.target.copyFrom(inPos);
+        const srcPos = cs.lock ? cs.point : inPos;
+        const srcVel = cs.lock ? this.cc._ZERO : cs.velocity;
+        // inerUpdate: offset затухает пружиной, выход = источник + offset
+        decaySpringToRef(cs.offsetPosition, cs.offsetVelocity, hl, dt, tmpX, tmpV);
+        cs.position.set(srcPos.x + tmpX.x, srcPos.y + tmpX.y, srcPos.z + tmpX.z);
+        cs.velocity.set(srcVel.x + tmpV.x, srcVel.y + tmpV.y, srcVel.z + tmpV.z);
+        cs.offsetPosition.copyFrom(tmpX);
+        cs.offsetVelocity.copyFrom(tmpV);
+        const unlock = cs.lock && BABYLON.Vector3.Distance(cs.point, inPos) > ur;
+        if (!cs.state && inState) {
+            cs.lock = true;
+            cs.point.copyFrom(cs.position);
+            cs.point.y = footHeightY;
+            // inerTrans(source=inPos,inVel → dest=point,0): offset = (src+off)−dest
+            cs.offsetPosition.set(cs.position.x + cs.offsetPosition.x - cs.point.x, cs.position.y + cs.offsetPosition.y - cs.point.y, cs.position.z + cs.offsetPosition.z - cs.point.z);
+            cs.offsetVelocity.set(cs.velocity.x + cs.offsetVelocity.x, cs.velocity.y + cs.offsetVelocity.y, cs.velocity.z + cs.offsetVelocity.z);
+        } else if ((cs.lock && cs.state && !inState) || unlock) {
+            cs.lock = false;
+            // inerTrans(source=point,0 → dest=inPos,inVel)
+            cs.offsetPosition.set(cs.point.x - inPos.x, cs.point.y - inPos.y, cs.point.z - inPos.z);
+            cs.offsetVelocity.set(-cs.velocity.x, -cs.velocity.y, -cs.velocity.z);
+        }
+        cs.state = inState;
+    }
+
+    // ------------------------------------------------------------------ two-bone IK (v71, 1-в-1)
+    ikTwoBone(a, b, c, t, fwd, ag, bg, pg, mxBuf) {
+        const vSub = (x, y) => ({ x: x.x - y.x, y: x.y - y.y, z: x.z - y.z });
+        const vAdd = (x, y) => ({ x: x.x + y.x, y: x.y + y.y, z: x.z + y.z });
+        const vMul = (x, s) => ({ x: x.x * s, y: x.y * s, z: x.z * s });
+        const vLen = (x) => Math.sqrt(x.x * x.x + x.y * x.y + x.z * x.z);
+        const vDot = (x, y) => x.x * y.x + x.y * y.y + x.z * y.z;
+        const vCross = (x, y) => ({ x: x.y * y.z - x.z * y.y, y: x.z * y.x - x.x * y.z, z: x.x * y.y - x.y * y.x });
+        const vNorm = (x, eps = 1e-8) => { const l = vLen(x) + eps; return { x: x.x / l, y: x.y / l, z: x.z / l }; };
+        const cf = (x) => x > 1 ? 1 : x < -1 ? -1 : x;
+        const maxE = vLen(vSub(a, b)) + vLen(vSub(b, c)) - mxBuf;
+        let tC = t;
+        if (vLen(vSub(t, a)) > maxE) tC = vAdd(a, vMul(vNorm(vSub(t, a)), maxE));
+        const axisRot = vNorm(vCross(vNorm(vSub(c, a)), fwd));
+        const lab = vLen(vSub(b, a)), lcb = vLen(vSub(b, c)), lat = vLen(vSub(tC, a));
+        const acAb0 = Math.acos(cf(vDot(vNorm(vSub(c, a)), vNorm(vSub(b, a)))));
+        const baBc0 = Math.acos(cf(vDot(vNorm(vSub(a, b)), vNorm(vSub(c, b)))));
+        const acAb1 = Math.acos(cf((lab * lab + lat * lat - lcb * lcb) / (2 * lab * lat)));
+        const baBc1 = Math.acos(cf((lab * lab + lcb * lcb - lat * lat) / (2 * lab * lcb)));
+        const qm = (q, p) => ({ w: p.w * q.w - p.x * q.x - p.y * q.y - p.z * q.z, x: p.w * q.x + p.x * q.w - p.y * q.z + p.z * q.y, y: p.w * q.y + p.x * q.z + p.y * q.w - p.z * q.x, z: p.w * q.z - p.x * q.y + p.y * q.x + p.z * q.w });
+        const qinv = (q) => ({ w: -q.w, x: q.x, y: q.y, z: q.z });
+        const mkQ = (ang, ax) => ({ w: Math.cos(ang / 2), x: ax.x * Math.sin(ang / 2), y: ax.y * Math.sin(ang / 2), z: ax.z * Math.sin(ang / 2) });
+        const q0 = mkQ(acAb1 - acAb0, axisRot);
+        const q1 = mkQ(baBc1 - baBc0, axisRot);
+        const cA = vNorm(vSub(c, a)), tA = vNorm(vSub(tC, a));
+        const ax = vNorm(vCross(cA, tA));
+        const ang = Math.acos(cf(vDot(cA, tA)));
+        const q2 = mkQ(ang, ax);
+        return { boneRootLr: qm(qinv(pg), qm(q2, qm(q0, ag))), boneMidLr: qm(qinv(ag), qm(q1, bg)) };
+    }
+    qNlerp(a, b, t) {
+        let bw = b.w, bx = b.x, by = b.y, bz = b.z;
+        const d = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+        if (d < 0) { bw = -bw; bx = -bx; by = -by; bz = -bz; }
+        const w = a.w + (bw - a.w) * t, x = a.x + (bx - a.x) * t, y = a.y + (by - a.y) * t, z = a.z + (bz - a.z) * t;
+        const l = Math.sqrt(w * w + x * x + y * y + z * z) + 1e-8;
+        return { w: w / l, x: x / l, y: y / l, z: z / l };
+    }
+    boneWorld(b) {
+        try {
+            const m = b.getWorldMatrix();
+            m.decompose(this.cc._mfsDs || (this.cc._mfsDs = new BABYLON.Vector3()), this.cc._mfsDq || (this.cc._mfsDq = new BABYLON.Quaternion()), this.cc._mfsDp || (this.cc._mfsDp = new BABYLON.Vector3()));
+            const q = this.cc._mfsDq, p = this.cc._mfsDp;
+            return { pos: { x: p.x, y: p.y, z: p.z }, rot: { x: q.x, y: q.y, z: q.z, w: q.w } };
+        } catch (_) { return null; }
+    }
+    boneLocal(b) {
+        const q = b.rotationQuaternion;
+        if (q) return { x: q.x, y: q.y, z: q.z, w: q.w };
+        const e = b.rotation;
+        const qq = BABYLON.Quaternion.FromEulerAngles(e.x, e.y, e.z);
+        return { x: qq.x, y: qq.y, z: qq.z, w: qq.w };
+    }
+
+    // ------------------------------------------------------------------ landing state (1c9eff)
+    mkLanding() { return { x: 0, y: 0, z: 0, valid: false, locked: false }; }
+
+    rayDown(x, fromY, z, len) {
+        const cc = this.cc;
+        const ray = cc._mfsRay || (cc._mfsRay = new BABYLON.Ray(new BABYLON.Vector3(), new BABYLON.Vector3(0, -1, 0), 4));
+        ray.origin.set(x, fromY, z);
+        ray.direction.set(0, -1, 0);
+        ray.length = len;
+        const pick = cc.scene.pickWithRay(ray, cc.supportPredicate);
+        return (pick && pick.hit && pick.pickedPoint) ? pick.pickedPoint.y : null;
+    }
+
+    // ------------------------------------------------------------------ предиктивная посадка (1c9eff, port)
+    predictLandingXZ(L, dt, rootVel, cycleDur) {
+        const P = this.cc.params;
+        const ankle = L.foot.getAbsolutePosition();
+        const blend = L.blendSmooth;
+        const ld = L.landing;
+
+        // Hard lock at plant (с гистерезисом выхода)
+        if (blend >= P.predLockBlend || (ld.locked && blend >= P.predLockExit)) {
+            if (ld.valid) {
+                const r = this.rayDown(ld.x, ankle.y + 1.5, ld.z, 4.0);
+                if (r !== null) ld.y += (r - ld.y) * dampF(dt, P.predSmoothTauY);
+            }
+            ld.locked = true;
+            return ld;
+        }
+        ld.locked = false;
+
+        // Soft commit: XZ заморожен, Y обновляется
+        if (blend >= P.predCommitBlend && ld.valid) {
+            const r = this.rayDown(ld.x, ankle.y + 1.5, ld.z, 4.0);
+            if (r !== null) ld.y += (r - ld.y) * dampF(dt, P.predSmoothTauY);
+            return ld;
+        }
+
+        // Free search: экстраполяция по скорости корня на оставшееся время переноса
+        const swingDur = Math.max(0.10, 0.4 * (cycleDur || 1.2));
+        const timeToLand = clampF(1 - blend, 0, 1) * swingDur;
+        let gx = ankle.x + rootVel.x * timeToLand;
+        let gz = ankle.z + rootVel.z * timeToLand;
+
+        const hip = L.thigh.getAbsolutePosition();
+        const dx = gx - hip.x, dz = gz - hip.z;
+        const horiz = Math.hypot(dx, dz);
+        const totalLen = L.lengths[0] + L.lengths[1];
+        const maxH = totalLen * 0.85;
+        if (horiz > maxH && horiz > 1e-6) { gx = hip.x + (dx / horiz) * maxH; gz = hip.z + (dz / horiz) * maxH; }
+
+        let bestX = gx, bestZ = gz, bestY = null;
+        const baseY = this.rayDown(gx, ankle.y + 1.5, gz, 4.0);
+        if (baseY !== null) bestY = baseY;
+        for (let i = 0; i < 8; i++) {
+            const ang = (i / 8) * Math.PI * 2;
+            const px = gx + Math.cos(ang) * P.predRadius;
+            const pz = gz + Math.sin(ang) * P.predRadius;
+            const hy = this.rayDown(px, ankle.y + 1.5, pz, 4.0);
+            if (hy === null) continue;
+            if (bestY === null || hy > bestY + P.predRaiseThreshold) { bestY = hy; bestX = px; bestZ = pz; }
+        }
+        if (bestY === null) return ld;
+
+        // Гистерезис: близко к текущей точке — прилипаем к ней
+        if (ld.valid) {
+            const dCur = Math.hypot(bestX - ld.x, bestZ - ld.z);
+            if (dCur < P.predHysteresis) {
+                const r = this.rayDown(ld.x, ankle.y + 1.5, ld.z, 4.0);
+                if (r !== null) { bestX = ld.x; bestZ = ld.z; bestY = r; }
+            }
+        }
+        // Ограничение смещения + повторный замер Y
+        const offX = bestX - ankle.x, offZ = bestZ - ankle.z;
+        const offLen = Math.hypot(offX, offZ);
+        if (offLen > P.predMaxOffset && offLen > 1e-6) {
+            const k = P.predMaxOffset / offLen;
+            bestX = ankle.x + offX * k; bestZ = ankle.z + offZ * k;
+            const r = this.rayDown(bestX, ankle.y + 1.5, bestZ, 4.0);
+            if (r !== null) bestY = r;
+        }
+        if (!ld.valid) {
+            ld.x = bestX; ld.z = bestZ; ld.y = bestY; ld.valid = true;
+        } else {
+            const kXZ = dampF(dt, P.predSmoothTauXZ);
+            ld.x += (bestX - ld.x) * kXZ;
+            ld.z += (bestZ - ld.z) * kXZ;
+            const kY = dampF(dt, P.predSmoothTauY);
+            ld.y += (bestY - ld.y) * kY;
+        }
+        return ld;
+    }
+
+    computeInfluence(blend) {
+        const P = this.cc.params;
+        const t = clampF(blend, 0, 1);
+        if (t <= P.predLockBlend) {
+            return t * t * (3 - 2 * t) * P.predInfluence;
+        }
+        const k = (t - P.predLockBlend) / (1 - P.predLockBlend);
+        return P.predInfluence + (P.predInfluenceAtPlant - P.predInfluence) * k;
+    }
+
+    // ------------------------------------------------------------------ ориентация стопы по подушечке (1c9eff, port)
+    orientFootFromToe(L, blend, ballRestOffset) {
+        const P = this.cc.params;
+        const footTn = L.foot, ballTn = L.ball;
+        L.appliedPitchDeg = 0; L.toePenetr = 0;
+        if (!ballTn || blend <= 0.01) return;
+        footTn.computeWorldMatrix(true);
+        ballTn.computeWorldMatrix(true);
+        const ankleW = footTn.getAbsolutePosition();
+        const ballW = ballTn.getAbsolutePosition();
+        const dx = ballW.x - ankleW.x, dz = ballW.z - ankleW.z;
+        const horizLen = Math.hypot(dx, dz);
+        const Ln = Math.hypot(dx, dz, ballW.y - ankleW.y);
+        if (Ln < 1e-5) return;
+        let hx, hz;
+        if (horizLen > Ln * 0.3) { hx = dx / horizLen; hz = dz / horizLen; }
+        else { const f = this.cc.masterForwardXZ(); hx = f.x; hz = f.z; }
+
+        // Итеративный зонд: куда опустить «виртуальный носок», чтобы ball коснулся рельефа
+        let d = Ln * 0.9;
+        for (let iter = 0; iter < 3; iter++) {
+            const px = ankleW.x + hx * d, pz = ankleW.z + hz * d;
+            const gy = this.rayDown(px, ankleW.y + 1.5, pz, 4.0);
+            if (gy === null) break;
+            const targetBallY = gy + ballRestOffset;
+            const dy = ankleW.y - targetBallY;
+            const sinPitch = clampF(dy / Ln, -1, 1);
+            const cosPitch = Math.sqrt(Math.max(0, 1 - sinPitch * sinPitch));
+            const newD = Math.max(Ln * 0.3, Ln * cosPitch);
+            if (Math.abs(newD - d) < 0.002) { d = newD; break; }
+            d = newD;
+        }
+        const probeX = ankleW.x + hx * d, probeZ = ankleW.z + hz * d;
+        const toeRaw = this.rayDown(probeX, ankleW.y + 1.5, probeZ, 4.0);
+        if (toeRaw !== null) {
+            if (L.toeGroundYSmooth === null) L.toeGroundYSmooth = toeRaw;
+            else L.toeGroundYSmooth += (toeRaw - L.toeGroundYSmooth) * dampF(this._lastDt || 0.016, 0.06);
+        }
+        const toeY = L.toeGroundYSmooth;
+        if (toeY === null) return;
+        L.toePenetr = (toeY + ballRestOffset) - ballW.y;
+
+        const dyNorm = clampF((toeY + ballRestOffset - ankleW.y) / Ln, -1, 1);
+        const hComp = Math.sqrt(Math.max(0, 1 - dyNorm * dyNorm));
+        const desiredDir = new BABYLON.Vector3(hx * hComp, dyNorm, hz * hComp);
+        const currentDir = new BABYLON.Vector3(dx / Ln, (ballW.y - ankleW.y) / Ln, dz / Ln);
+        const cosA = clampF(BABYLON.Vector3.Dot(currentDir, desiredDir), -1, 1);
+        const pitchRad = Math.acos(cosA);
+        L.appliedPitchDeg = pitchRad * 180 / Math.PI * blend;
+        if (pitchRad < 1e-5) return;
+        const axis = BABYLON.Vector3.Cross(currentDir, desiredDir);
+        if (axis.lengthSquared() < 1e-10) return;
+        axis.normalize();
+        const appliedAngle = pitchRad * blend;
+        const deltaQ = BABYLON.Quaternion.RotationAxis(axis, appliedAngle);
+        const parentWQ = footTn.parent ? footTn.parent.getWorldMatrix().clone() : BABYLON.Quaternion.Identity();
+        // world-кватернион родителя извлекаем корректно:
+        const decS = new BABYLON.Vector3(), decQ = new BABYLON.Quaternion(), decP = new BABYLON.Vector3();
+        (footTn.parent ? footTn.parent.getWorldMatrix() : BABYLON.Matrix.Identity()).decompose(decS, decQ, decP);
+        const qAnimLocal = footTn.rotationQuaternion ? footTn.rotationQuaternion.clone() : BABYLON.Quaternion.FromEulerVector(footTn.rotation.clone());
+        const qAnimWorld = decQ.multiply(qAnimLocal);
+        const qTargetWorld = deltaQ.multiply(qAnimWorld);
+        const parentInv = decQ.clone().invert ? decQ.clone().invert() : decQ.conjugate();
+        footTn.rotationQuaternion = parentInv.multiply(qTargetWorld);
+        footTn.computeWorldMatrix(true);
+    }
+
+    // ------------------------------------------------------------------ компенсация таза (1c9eff, port)
+    applyPelvisDeltaWorldY(pelvis, dy) {
+        if (!pelvis || Math.abs(dy) < 1e-5) return;
+        const decS = new BABYLON.Vector3(), decQ = new BABYLON.Quaternion(), decP = new BABYLON.Vector3();
+        (pelvis.parent ? pelvis.parent.getWorldMatrix() : BABYLON.Matrix.Identity()).decompose(decS, decQ, decP);
+        const mat = BABYLON.Matrix.Identity();
+        BABYLON.Matrix.FromQuaternionToRef(decQ.clone().invert ? decQ.clone().invert() : decQ.conjugate(), mat);
+        const localVec = BABYLON.Vector3.TransformNormal(new BABYLON.Vector3(0, dy, 0), mat);
+        pelvis.position.addInPlace(localVec);
+        pelvis.computeWorldMatrix(true);
+    }
+
+    // ------------------------------------------------------------------ калибровка профилей (1c9eff, port)
+    startCalibration(animName) {
+        const g = this.cc.animByName.get(animName);
+        const dur = g ? Math.max(0.1, (g.to - g.from) / 60) : 1.0;
+        const maxFrames = clampF(Math.floor(dur * 60), 15, 90);
+        this._calib = {
+            animName, frames: 0, maxFrames,
+            L: { minAnkleY: Infinity, maxAnkleY: -Infinity, minGroundY: Infinity, minBallY: Infinity },
+            R: { minAnkleY: Infinity, maxAnkleY: -Infinity, minGroundY: Infinity, minBallY: Infinity },
+        };
+    }
+    calibrationTick() {
+        const c = this._calib;
+        if (!c) return;
+        for (const key of ['L', 'R']) {
+            const leg = this.legs[key];
+            if (!leg) continue;
+            leg.foot.computeWorldMatrix(true);
+            const ay = leg.foot.getAbsolutePosition().y;
+            const bb = this.rayDown(leg.foot.getAbsolutePosition().x, ay + 1.5, leg.foot.getAbsolutePosition().z, 4.0);
+            const st = c[key];
+            if (ay < st.minAnkleY) st.minAnkleY = ay;
+            if (ay > st.maxAnkleY) st.maxAnkleY = ay;
+            if (bb !== null && bb < st.minGroundY) st.minGroundY = bb;
+            if (leg.ball) {
+                leg.ball.computeWorldMatrix(true);
+                const by = leg.ball.getAbsolutePosition().y;
+                if (by < st.minBallY) st.minBallY = by;
+            }
+        }
+        c.frames++;
+        if (c.frames >= c.maxFrames) this.finalizeCalibration();
+    }
+    finalizeCalibration() {
+        const c = this._calib;
+        if (!c) return;
+        this._calib = null;
+        const okL = isFinite(c.L.minAnkleY) && isFinite(c.L.minGroundY);
+        const okR = isFinite(c.R.minAnkleY) && isFinite(c.R.minGroundY);
+        if (!okL || !okR) return; // не удалось — просто пропускаем
+        const MIN_O = 0.01, MAX_O = 0.5;
+        let offL = Math.max(MIN_O, c.L.minAnkleY - c.L.minGroundY);
+        let offR = Math.max(MIN_O, c.R.minAnkleY - c.R.minGroundY);
+        if (offL > MAX_O) offL = 0.05;
+        if (offR > MAX_O) offR = 0.05;
+        const prof = {
+            restAnkleOffsetL: offL, restAnkleOffsetR: offR,
+            minAnkleYL: c.L.minAnkleY, minAnkleYR: c.R.minAnkleY,
+            swingAmpL: Math.max(0.02, c.L.maxAnkleY - c.L.minAnkleY),
+            swingAmpR: Math.max(0.02, c.R.maxAnkleY - c.R.minAnkleY),
+            ballRestOffsetL: isFinite(c.L.minBallY) ? Math.max(0, c.L.minBallY - c.L.minGroundY) : 0,
+            ballRestOffsetR: isFinite(c.R.minBallY) ? Math.max(0, c.R.minBallY - c.R.minGroundY) : 0,
+            restGroundY: Math.min(isFinite(c.L.minGroundY) ? c.L.minGroundY : 0, isFinite(c.R.minGroundY) ? c.R.minGroundY : 0),
+        };
+        this.profiles.set(c.animName, prof);
+        if (!this.defaultProfile) this.defaultProfile = prof;
+        this._advanceBatch();
+    }
+    startBatchCalibration() {
+        const cc = this.cc;
+        const queue = [...cc.animByName.keys()].filter(n => !this.profiles.has(n));
+        if (!queue.length) return;
+        this._batch = { queue, idx: 0 };
+        this._playMasterClip(queue[0], true);
+    }
+    _advanceBatch() {
+        const b = this._batch;
+        if (!b) return;
+        b.idx++;
+        if (b.idx >= b.queue.length) {
+            this._batch = null;
+            this._playMasterClip(this.cc.master.groups.walk ? this.cc.master.groups.walk.name : (this.cc.animByName.keys().next().value || ''), true);
+            this.cc.master.batchCalibrating = false;
+            return;
+        }
+        this._playMasterClip(b.queue[b.idx], true);
+    }
+    _playMasterClip(name, loop) {
+        const g = this.cc.animByName.get(name);
+        if (!g) return;
+        this.cc.master.playGroup(g, loop);
+    }
+    getActiveProfile() {
+        const name = this.activeAnimName;
+        if (name && this.profiles.has(name)) return this.profiles.get(name);
+        if (this._batch) return null;           // идёт калибровка — IK ждёт
+        if (name && !this._calib) this.startCalibration(name);
+        return this.defaultProfile || null;     // fallback на дефолтный профиль (как EXTRA_POOL в оригинале)
+    }
+
+    // ------------------------------------------------------------------ главный цикл ног мастера
+    update(dt, t) {
         const cc = this.cc, P = cc.params;
         if (!this.enabled) return;
-        for (const side of ['left', 'right']) {
-            const ctrl = this.controllers[side], target = this.targets[side];
-            if (!ctrl || !target) continue;
-            const footRef = cc.colliderRefs.find(r => r.isFootWeld && new RegExp(side === 'left' ? '_l|left' : '_r|right', 'i').test(r.name));
-            const legRef = footRef ? footRef.parentRef : null;
-            if (!legRef) continue;
+        this._lastDt = dt;
 
-            // Желаемая позиция стопы: физическая стопа, но Y скорректирован по рейкасту опоры
-            let desiredWorld;
-            try {
-                desiredWorld = footRef.mesh.getAbsolutePosition().clone();
-            } catch (_) { this.weights[side] = 0; ctrl.update(); continue; }
+        // скорость корня мастера (для предикции) + GAIT_SPEED_K пульс (1c9eff)
+        const rp = cc.master.mesh.position;
+        if (this._lastRootPos && dt > 1e-5) {
+            this._rootVel.set((rp.x - this._lastRootPos.x) / dt, 0, (rp.z - this._lastRootPos.z) / dt);
+            const k = dampF(dt, 0.12);
+            this._rootVelSmooth.x += (this._rootVel.x - this._rootVelSmooth.x) * k;
+            this._rootVelSmooth.z += (this._rootVel.z - this._rootVelSmooth.z) * k;
+        } else {
+            this._rootVelSmooth.set(0, 0, 0);
+        }
+        this._lastRootPos = this._lastRootPos ? this._lastRootPos.copyFrom(rp) : rp.clone();
 
-            const supY = cc.raycastSupportY(desiredWorld.x, desiredWorld.z, desiredWorld.y + 0.4);
-            const grounded = footRef.groundContacts > 0;
-            let weight = 0;
-            if (supY !== null) {
-                const gap = desiredWorld.y - supY;
-                // Стопа «под землёй» или висит слишком низко относительно рельефа → корректируем
-                if (gap < -0.02 || (grounded && Math.abs(gap) > P.footSupportTol)) {
-                    weight = smoothstep(0.02, 0.15, Math.abs(gap));
-                    desiredWorld.y = supY + P.ikFootLift;
-                } else if (!grounded && cc.feetSupport.supported === 0 && cc.followingScale > 0.5) {
-                    // Полностью в воздухе (прыжок/спуск) — тянем стопу к предполагаемой земле
-                    weight = 0.5;
-                    desiredWorld.y = supY + P.ikFootLift;
+        // online-калибровка приоритетнее работы IK (как calibrationTick-return в оригинале)
+        if (this._calib) { this.calibrationTick(); return; }
+
+        const profile = this.getActiveProfile();
+        const moving = cc.master.state === 'WALKING' || cc.master.state === 'RUNNING';
+        const speedBase = moving ? (cc.master.state === 'RUNNING' ? P.runSpeed : P.walkSpeed) : 0;
+        const gaitPulse = 1 + Math.sin(cc.master.walkPhase * 2) * P.gaitSpeedK; // GAIT_SPEED_K
+        const cycleDur = clampF(1.2 / Math.max(0.3, speedBase * gaitPulse), 0.4, 2.5);
+
+        const canIK = cc.slaveAlive && !cc.ragdollActive && cc.feetSupport.supportY !== null;
+        let plantedOffsets = [];
+
+        for (const key of Object.keys(this.legs)) {
+            const L = this.legs[key];
+            const isLeft = key === 'L';
+            const footRef = cc.colliderRefs.find(r => r.isFootWeld && new RegExp(isLeft ? '_l|left' : '_r|right', 'i').test(r.name));
+            if (!footRef) continue;
+
+            try { cc.skelRef.prepare(); } catch (_) {}
+            L.foot.computeWorldMatrix(true);
+            const fW = L.foot.getAbsolutePosition();
+
+            // --- blend из калибровочного профиля (1c9eff): насколько стопа ушла вниз в опору
+            let rawBlend = 0;
+            if (profile) {
+                const minAY = isLeft ? profile.minAnkleYL : profile.minAnkleYR;
+                const amp = isLeft ? profile.swingAmpL : profile.swingAmpR;
+                rawBlend = clampF(1 - (fW.y - minAY) / Math.max(0.02, amp), 0, 1);
+            }
+            L.blendSmooth += (rawBlend - L.blendSmooth) * dampF(dt, P.masterBlendTau);
+
+            // --- инерционный spring-контакт (v71): lock позиции при касании
+            const vY = L.prevFootPos ? (fW.y - L.prevFootPos.y) / Math.max(dt, 1e-5) : 0;
+            L.prevFootPos = L.prevFootPos ? L.prevFootPos.copyFrom(fW) : fW.clone();
+            const supY = this.rayDown(fW.x, fW.y + 0.6, fW.z, 1.2);
+            const dG = supY !== null ? (fW.y - supY) : 1;
+            const isDown = (footRef.groundContacts > 0) || (dG < 0.08 && Math.abs(vY) < 0.6);
+            const footHeightY = (supY !== null ? supY : 0) + (footRef.bindCenter.y - footRef.boxSize.y * 0.5) * 0 ; // низ коллайдера как точка контакта
+            this.contactUpdate(L.contact, fW, isDown, P.contactUnlockRadius, (supY !== null ? supY : fW.y) + 0.03, P.contactSpringHalfLife, dt);
+
+            // --- plant-вес: tgt=lock?1:0, τ-демпфирование (v71) + каскад mixing weights
+            const tgt = L.contact.lock ? 1 : 0;
+            L.plant += (tgt - L.plant) * dampF(dt, 0.06);
+            if (L.plant < 0.005) L.plant = 0;
+            const follow = clampF(cc.followingScale, 0, 1);
+            const ikWeight = canIK ? clampF(Math.max(L.plant, L.blendSmooth * 0.8) * follow * cc.staggerCoef, 0, 1) : 0;
+
+            // --- предиктивная посадка XZ (1c9eff)
+            let land = null;
+            if (P.predictive && canIK) land = this.predictLandingXZ(L, dt, this._rootVelSmooth, cycleDur);
+
+            // influence-смешение XZ цели
+            let mixX = fW.x, mixZ = fW.z;
+            if (land && land.valid) {
+                const infl = this.computeInfluence(L.blendSmooth);
+                mixX = fW.x + (land.x - fW.x) * infl;
+                mixZ = fW.z + (land.z - fW.z) * infl;
+            }
+            // heel-Y: из locked landing либо свежий рейкаст под смешанной точкой
+            let heelY;
+            if (land && land.valid && land.locked) heelY = land.y;
+            else {
+                const r = this.rayDown(mixX, fW.y + 1.5, mixZ, 4.0);
+                heelY = r !== null ? r : fW.y;
+            }
+            const restOff = isLeft ? (profile ? profile.restAnkleOffsetL : 0.08) : (profile ? profile.restAnkleOffsetR : 0.08);
+            const tgtYL = heelY + restOff;
+
+            // --- коллекционируем «посаженные» стопы для компенсации таза
+            const plantedBlend = P.pelvisPlantedBlend;
+            if (L.blendSmooth > plantedBlend && profile) {
+                plantedOffsets.push(heelY - profile.restGroundY);
+            }
+
+            // --- two-bone IK (v71) поверх скинет-скелета, вес = ikWeight
+            if (ikWeight > 0.005) {
+                const tW = this.boneWorld(L.thigh), sW = this.boneWorld(L.shin), fw = this.boneWorld(L.foot);
+                const par = L.thigh.getParent();
+                const pW = par ? this.boneWorld(par) : { pos: { x: 0, y: 0, z: 0 }, rot: { w: 1, x: 0, y: 0, z: 0 } };
+                if (tW && sW && fw) {
+                    const fwd = cc.masterForwardXZ();
+                    const contactPos = L.contact.position;
+                    const target = { x: mixX, y: tgtYL, z: mixZ };
+                    // смешиваем contact-пружину и landing-цель: пружина даёт инерцию, цель — рельеф
+                    const sx = contactPos.x * 0.35 + target.x * 0.65;
+                    const sy = Math.max(contactPos.y * 0.35 + target.y * 0.65, tgtYL - 0.02);
+                    const sz = contactPos.z * 0.35 + target.z * 0.65;
+                    const res = this.ikTwoBone(tW.pos, sW.pos, fw.pos, { x: sx, y: sy, z: sz }, fwd, tW.rot, sW.rot, pW.rot, 0.02);
+                    try {
+                        L.thigh.setRotationQuaternion(this.qToB(this.qNlerp(this.boneLocal(L.thigh), res.boneRootLr, ikWeight)), BABYLON.Space.LOCAL);
+                        L.shin.setRotationQuaternion(this.qToB(this.qNlerp(this.boneLocal(L.shin), res.boneMidLr, ikWeight)), BABYLON.Space.LOCAL);
+                    } catch (_) {}
                 }
             }
-            // Смешение веса IK с общим following (в ragdoll IK не мешает физике)
-            weight *= clampF(cc.followingScale, 0, 1);
-            this.weights[side] = lerpF(this.weights[side], weight, Math.min(1, dt * 8));
 
-            // Запись в local-space кости-родителя голенени (таз/спина) либо в мир через parent-node
-            const anchor = legRef.parentRef ? legRef.parentRef.mesh : cc.rootRef.mesh;
-            const invAnchor = anchor.getWorldMatrix().clone().invert();
-            const desiredLocal = BABYLON.Vector3.TransformCoordinates(desiredWorld, invAnchor);
-            target.parent = anchor;
-            const k = clampF(this.weights[side], 0, 1);
-            if (k > 0.01) {
-                BABYLON.Vector3.LerpToRef(target.position, desiredLocal, k * Math.min(1, dt * 10) + 0.02, target.position);
+            // --- доворот стопы по подушечке (1c9eff)
+            if (profile && canIK) {
+                this.orientFootFromToe(L, ikWeight, isLeft ? profile.ballRestOffsetL : profile.ballRestOffsetR);
             }
-            try { ctrl.update(); } catch (_) {}
+        }
+
+        // --- компенсация таза: min ΔY по посаженным стопам, τ-сглаживание (1c9eff)
+        let pelvisTarget = this.pelvisDeltaYSmooth;
+        if (P.pelvisCompensation && plantedOffsets.length > 0) {
+            pelvisTarget = Math.min.apply(null, plantedOffsets);
+        }
+        this.pelvisDeltaYSmooth += (pelvisTarget - this.pelvisDeltaYSmooth) * dampF(dt, P.pelvisTau);
+        this.pelvisDeltaY = this.pelvisDeltaYSmooth;
+        if (P.pelvisCompensation && canIK && Math.abs(this.pelvisDeltaY) > 1e-4) {
+            const anyLeg = this.legs[Object.keys(this.legs)[0]];
+            if (anyLeg) this.applyPelvisDeltaWorldY(anyLeg.pelvis, this.pelvisDeltaY);
+        }
+        try { cc.skelRef.prepare(); } catch (_) {}
+    }
+
+    qToB(q) { return new BABYLON.Quaternion(q.x, q.y, q.z, q.w); }
+
+    resetOnAnimSwitch() {
+        for (const key of Object.keys(this.legs)) {
+            const L = this.legs[key];
+            L.blendSmooth = 0; L.toeGroundYSmooth = null; L.landing = this.mkLanding(); L.toePenetr = 0;
         }
     }
 
     dispose() {
-        for (const s of ['left', 'right']) {
-            try { this.controllers[s]?.dispose?.(); } catch (_) {}
-            try { this.targets[s]?.dispose(); } catch (_) {}
-        }
-        this.controllers = { left: null, right: null };
-        this.targets = { left: null, right: null };
+        this.legs = {};
         this.enabled = false;
     }
 }
@@ -767,7 +1317,7 @@ export class CharacterController {
         this.activeEnabled = true;
 
         this.master = new MasterController(this);
-        this.footIK = new FootIK(this);
+        this.masterFeet = new MasterFootSystem(this);
 
         this._observers = [];
         this._build();
@@ -784,8 +1334,8 @@ export class CharacterController {
         // Рагдолл-слейв
         this._createRagdoll();
 
-        // IK
-        if (this.options.ik?.enabled !== false && this.params.ikEnabled) this.footIK.setup();
+        // Мастер-ноги: two-bone IK + предиктивная посадка + профили калибровки
+        this.masterFeet.setup();
 
         // Коллизии → контакты/удары
         this._bindCollisions();
@@ -1613,7 +2163,7 @@ export class CharacterController {
             this._updateSlaveController(dt);
             this._followAnimation(dt);
             this._applyBalance(dt);
-            this.footIK.update(dt);
+            this.masterFeet.update(dt, t);
         }
 
         // 4) Drag
@@ -1761,7 +2311,7 @@ export class CharacterController {
         window.removeEventListener('keyup', this._onKeyUp);
         if (this._onPointerDown) this.scene.getEngine().getRenderingCanvas().removeEventListener('pointerdown', this._onPointerDown);
         if (this._onPointerUp) window.removeEventListener('pointerup', this._onPointerUp);
-        this.footIK.dispose();
+        this.masterFeet.dispose();
         this.master.destroy();
         for (const c of this.constraints) { try { c.dispose(); } catch (_) {} }
         this.constraints = [];
