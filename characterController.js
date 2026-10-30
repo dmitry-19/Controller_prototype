@@ -143,6 +143,31 @@ export const DEFAULT_PARAMS = {
     rampUpTime: 8.0,                // ramp walk→run→sprint (s)
     rampDownTime: 6.0,              // затухание ramp без ввода (s)
     inputSmoothTau: 0.10,           // τ сглаживания вектора ввода
+    sprintRampTime: 0.6,            // время входа в спринт- tier (v71 sprintT)
+    rampMaxNoShift: 0.35,           // потолок ramp без Shift (walk tier)
+    shiftPierce: 0.5,               // доля speedLimit, «пробиваемая» Shift'ом
+    slopeFactor: 1.35,              // усиление уклона: boost и множитель скорости
+    sprintBlockZone: 0.55,          // zoneMul ниже этого — спринт заблокирован
+    sprintBlockSlope: 0.30,         // крутой подъём выше этого — спринт заблокирован
+    turnIdleBlend: 0.35,            // подмешивание idle при повороте (v71 rotBlend)
+    fadeIn: [0.18, 0.62],           // скорость набора веса клипа [быстро..медленно]
+    fadeOut: [0.22, 0.72],          // скорость сброса веса клипа
+    valueUp: [0.12, 0.42],          // τ разгона valueFwd/Side
+    valueDown: [0.10, 0.32],        // τ торможения valueFwd/Side
+    modeSpeedMul: { loco: 1, strafe: 1, crouch: 0.55, injured: 0.45 },
+    backIdleBlend: { crouch: 0.5, injured: 0.6 }, // idle при ходе назад в режиме
+    autoInjured: false,             // авто-переключение в injured chain при низкой скорости
+    injuredEnterZone: 0.45, injuredExitZone: 0.70,
+    // Цепи локамоции v71 (5 цепей): массивы ключей [{animName|group, center, plateau}]
+    // fwd/side оси в единицах valueFwd/valueSide (0..1 поле градиента).
+    chains: {
+        locoFwd:    null,   // Idle(0) → Walk → Run → Sprint (автодетект из клипов, если null)
+        locoBack:   null,   // backward-цепь loco (center < 0)
+        strafeLeft: null,   // side-цепь влево
+        strafeRight:null,   // side-цепь вправо
+        crouchFwd:  null,   // crouch-локомоция (режим crouch)
+        injuredFwd: null,   // injured/hurt-локомоция (режим injured)
+    },
     contactSpringHalfLife: 0.05,    // hl инерционного spring-контакта стопы
     contactUnlockRadius: 0.15,      // ur — рассогласование, разрывающее lock контакта
     masterClipWeightScale: true,    // масштабировать веса клипов мастера на followingScale
@@ -372,6 +397,16 @@ class MasterController {
         this._field = { fwd: 0, side: 0 }; // IDW-поле анимаций (blend field)
         this._fwdS = 0; this._sideS = 0;   // сглаженные оси движения
         this._ramp = 0;                    // 0..1 плавная смена скорости локомоции
+        // --- v71 locomotion state (inputZ→fwd, inputX→side, rampT/sprintT/tiers) ---
+        this.inputFwd = 0; this.inputSide = 0;   // сглаженные компоненты ввода [-1..1]
+        this.valueFwd = 0; this.valueSide = 0;   // координаты точки в blend-поле цепей
+        this.rampT = 0; this.sprintT = 0;        // ramp walk→run→sprint и спринт-подъём
+        this.speed = 0; this.speedTarget = 0;    // м/с мастера (факт/цель)
+        this.slopeGrad = 0;                      // тангенс уклона под мастером (+ подъём)
+        this.zoneMul = 1;                        // внешняя зона скорости (AI/health/stamina)
+        this.clipMode = 'procedural';            // 'groups' | 'chains' | 'procedural'
+        this.modeBindings = {}; this.chains = { locoFwd: [], locoBack: [], strafeLeft: [], strafeRight: [], crouchFwd: [], injuredFwd: [] };
+        this.prevMode = 'loco'; this.autoInjuredActive = false;
     }
 
     create(sourceMesh, skeleton, animGroups, LM) {
@@ -426,12 +461,230 @@ class MasterController {
             else if (/fall|jump|air|float/i.test(n) && !this.groups.fall) this.groups.fall = g;
         }
         this.mode = (this.groups.idle && (this.groups.walk || this.groups.run)) ? 'groups' : 'procedural';
+        // 'chains' — полноценный блендер 5 цепей v71; включается, если есть locoFwd-цепь с ≥2 ключами
+        this.clipMode = this.mode;          // 'groups' | 'procedural' | 'chains'
 
         // name → group (для калибровки профилей MasterFootSystem и blend-поля)
         cc.animByName = new Map();
         for (const g of (animGroups || [])) cc.animByName.set(g.name, g);
         // world-forward мастера (идея оригинала: forward mesh'а мастера для предикции стопы)
         this.forwardVec = new BABYLON.Vector3(0, 0, 1);
+
+        // --- v71: 5 цепей локамоции + режимы (autoDetectModes из deepseek_html_20261028_644a29.html) ---
+        this._buildChains();
+    }
+
+    // ------------------------------------------------------------------
+    // ЦЕПИ ЛОКОМОЦИИ (port v71: normalizeChain/chainTiers/autoDetectModes).
+    // Пять цепей: locoFwd (Idle→Walk→Run→Sprint), locoBack, strafeLeft,
+    // strafeRight, crouchFwd; плюс injuredFwd как опциональная 6-я.
+    // Если пользователь задал params.chains — используется он; иначе ключи
+    // автодетектируются из имён клипов (walk/run/sprint/back/strafe/crouch/injured).
+    _mkKey(name, center) { return { animName: name, center }; }
+    _findClip(re, excludeRe) {
+        for (const [n] of this.cc.animByName) {
+            const ln = n.toLowerCase();
+            if (re.test(ln) && !(excludeRe && excludeRe.test(ln))) return n;
+        }
+        return null;
+    }
+    _buildChains() {
+        const P = this.cc.params;
+        const user = P.chains || {};
+        const byN = (u, auto) => (Array.isArray(u) && u.length ? u.map(k => ({ animName: k.animName, center: k.center ?? 0 })) : auto);
+        const idleN = this.groups.idle ? this.groups.idle.name : null;
+        const walkN = this._findClip(/walk/, /back|strafe|crouch|injured|hurt|sprint|run|jog/);
+        const runN  = this._findClip(/(^|[^a-z])(run|jog)([^a-z]|$)/i, /back|strafe|crouch|sprint/);
+        const sprN  = this._findClip(/sprint/, /back|strafe/);
+        const backN = this._findClip(/back/i, /strafe|pack|stack|black/);
+        const strL  = this._findClip(/strafe.*l|^side_l|left/i, /run|sprint/);
+        const strR  = this._findClip(/strafe.*r|^side_r|right/i, /run|sprint/);
+        const crN   = this._findClip(/crouch/, /back|run|sprint/);
+        const injN  = this._findClip(/injured|hurt/, /back/);
+
+        this.chains = {
+            locoFwd: byN(user.locoFwd, [idleN, walkN, runN, sprN].filter(Boolean)
+                .map((n, i) => this._mkKey(n, [0, 0.3, 0.65, 0.9][i]))),
+            locoBack: byN(user.locoBack, [backN, crN && injN ? null : null].filter(Boolean)
+                .map((n, i) => this._mkKey(n, [-0.5 - i * 0.25]))),
+            strafeLeft: byN(user.strafeLeft, [strL].filter(Boolean).map(n => this._mkKey(n, -0.6))),
+            strafeRight: byN(user.strafeRight, [strR].filter(Boolean).map(n => this._mkKey(n, 0.6))),
+            crouchFwd: byN(user.crouchFwd, [crN].filter(Boolean).map(n => this._mkKey(n, 0.35))),
+            injuredFwd: byN(user.injuredFwd, [injN].filter(Boolean).map(n => this._mkKey(n, 0.3))),
+        };
+        // modeBindings (v71): loco={fwd}, strafe={fwd+side L/R}, crouch={crouchFwd}, injured={injuredFwd}
+        this.modeBindings = {};
+        if (this.chains.locoFwd.length) this.modeBindings.loco = { fwdId: 'locoFwd', backId: 'locoBack' };
+        if (this.chains.locoFwd.length && (this.chains.strafeLeft.length || this.chains.strafeRight.length))
+            this.modeBindings.strafe = { fwdId: 'locoFwd', backId: 'locoBack', sideIds: ['strafeLeft', 'strafeRight'] };
+        if (this.chains.crouchFwd.length) this.modeBindings.crouch = { fwdId: 'crouchFwd' };
+        if (this.chains.injuredFwd.length) this.modeBindings.injured = { fwdId: 'injuredFwd' };
+        this.mode = this.modeBindings.loco ? 'loco' : 'none';
+        this.prevMode = 'loco';
+        this.autoInjuredActive = false;
+        // веса клипов мастера: currentW (port currentW/setGroupWeight)
+        this._curW = new Map();
+        for (const n of this.cc.animByName.keys()) this._curW.set(n, 0);
+        if (this.clipMode === 'groups' && this.chains.locoFwd.length >= 2) {
+            this.clipMode = 'chains';       // есть полная loco-цепь → включаем блендер v71
+            this._snapNext = true;
+        }
+    }
+    getChain(id) { return this.chains[id] || null; }
+    // chainTiers (v71): позиции walk/run/sprint внутри fwd-цепи
+    chainTiers(cF) {
+        const def = { walk: 0.3, run: 0.65, sprint: 0.9 };
+        if (!cF || !cF.length) return def;
+        const pos = cF.filter(k => k.center > 0.05).slice().sort((a, b) => a.center - b.center);
+        if (!pos.length) return def;
+        let walk = pos[0].center, run = pos[pos.length - 1].center, sprint = run;
+        for (const k of pos) {
+            const nm = k.animName.toLowerCase();
+            if (/walk/.test(nm) && !/back/.test(nm)) walk = k.center;
+            if (/(jog|run)/.test(nm) && !/sprint|back/.test(nm)) run = k.center;
+            if (/sprint/.test(nm)) sprint = k.center;
+        }
+        return { walk, run, sprint };
+    }
+    chainRange(cF) {
+        if (!cF || !cF.length) return { min: 0, max: 0 };
+        let min = Infinity, max = -Infinity;
+        for (const k of cF) { min = Math.min(min, k.center); max = Math.max(max, k.center); }
+        return { min, max };
+    }
+    // buildField (v71): опорные точки IDW-поля из активных цепей режима
+    buildField(mode) {
+        const b = this.modeBindings[mode || this.mode];
+        const pts = []; const seen = new Set();
+        if (!b) return pts;
+        const addChain = (id, axis) => {
+            const c = this.getChain(id);
+            if (!c) return;
+            for (const k of c) {
+                if (axis === 'side' && Math.abs(k.center) < 0.05) continue;
+                if (seen.has(k.animName)) continue; seen.add(k.animName);
+                pts.push(axis === 'fwd' ? { animName: k.animName, x: 0, y: k.center }
+                                        : { animName: k.animName, x: k.center, y: 0 });
+            }
+        };
+        addChain(b.fwdId, 'fwd');
+        if (b.backId) addChain(b.backId, 'fwd');
+        if (b.sideIds) for (const sid of b.sideIds) addChain(sid, 'side');
+        return pts;
+    }
+    // computeContribs (v71): IDW w_i = 1/d_i^sharpness / Σ
+    computeContribs(pts, vx, vy, sharp) {
+        if (!pts.length) return [];
+        const eps = this.cc.params.fieldEps ?? 0.0001;
+        let sum = 0; const ws = [];
+        for (const p of pts) {
+            const dx = p.x - vx, dy = p.y - vy;
+            const d2 = dx * dx + dy * dy + eps;
+            const w = 1 / Math.pow(d2, sharp / 2);
+            ws.push(w); sum += w;
+        }
+        return pts.map((p, i) => ({ animName: p.animName, weight: ws[i] / sum }));
+    }
+    setMode(m) {
+        if (m === this.mode) return;
+        if (!this.modeBindings[m]) return;
+        this.prevMode = this.mode; this.mode = m;
+        if (m !== 'injured') this.autoInjuredActive = false;
+    }
+    // getIdleForCurrentMode (v71): idle-клип привязан к нулевому ключу fwd-цепи
+    idleAnimName() {
+        const b = this.modeBindings[this.mode];
+        const cF = b ? this.getChain(b.fwdId) : null;
+        if (cF) for (const k of cF) if (Math.abs(k.center) < 0.05) return k.animName;
+        return this.groups.idle ? this.groups.idle.name : null;
+    }
+    static _tv(P, key, t) { const v = P[key]; return Array.isArray(v) ? lerpF(v[0], v[1], clampF(t, 0, 1)) : v; }
+
+    // setGroupWeight (v71): вес через animatables клипа
+    setClipWeight(g, w) {
+        if (!g) return;
+        if (!isFinite(w)) w = 0; w = clampF(w, 0, 1);
+        try { for (const x of g.animatables ?? []) { if (x) { try { x.weight = w; } catch (_) {} } } } catch (_) {}
+    }
+
+    // ------------------------------------------------------------------
+    // applyWeights (port v71): цели весов из IDW-поля цепей + idle-бленды,
+    // плавные fade in/out по текущим весам. Заменяет грубый переключатель
+    // «один клип» в animate() — режим 'groups' теперь полноценный блендер.
+    applyWeights(dt) {
+        const cc = this.cc, P = cc.params;
+        if (!this._curW) return;
+        const targets = new Map();
+        const fieldMode = this.clipBlendActive();
+        if (fieldMode) {
+            const pts = this.buildField();
+            const sharp = MasterController._tv(P, 'fieldSharpness', 0.5);
+            const contribs = this.computeContribs(pts, this._fwdS, this._sideS, sharp);
+            for (const c of contribs) if (c.weight > 0.001) targets.set(c.animName, c.weight);
+        } else {
+            // вне blend-режима (ragdoll/fall/калибровка): целевой клип один
+            const want = this._stateClipName();
+            if (want) targets.set(want, 1);
+        }
+        // idle-бленды v71: rotBlend (поворот) + extraIdleBlend (ход назад в crouch/injured)
+        let extraIdle = 0;
+        if (fieldMode && this.valueFwd < -0.02) {
+            const bi = P.backIdleBlend || {};
+            if (this.mode === 'crouch') extraIdle = (bi.crouch ?? 0.5) * Math.min(1, Math.abs(this.valueFwd));
+            else if (this.mode === 'injured') extraIdle = (bi.injured ?? 0.6) * Math.min(1, Math.abs(this.valueFwd));
+        }
+        const inputX = Math.abs(this.inputSide || 0);
+        let rotBlend = inputX > 0.08 ? Math.min(P.turnIdleBlend, inputX * P.turnIdleBlend) : 0;
+        const totalIdleBlend = clampF(rotBlend + extraIdle, 0, 0.85);
+        const idleG = this.idleAnimName();
+        if (totalIdleBlend > 0.001 && idleG) {
+            let sum = 0; for (const [, w] of targets) sum += w;
+            if (sum > 0.001) {
+                for (const [name, w] of targets) if (w > 0) targets.set(name, w * (1 - totalIdleBlend));
+                targets.set(idleG, (targets.get(idleG) || 0) + totalIdleBlend);
+            }
+        }
+        // truly idle → только idle-клип
+        if (Math.abs(this.valueFwd) < 0.02 && Math.abs(this.valueSide) < 0.02 && (this.speed || 0) < 0.05 && idleG) {
+            targets.clear(); targets.set(idleG, 1);
+        }
+        // ramp-скорость проигрывания циклов (walk tier → sprint tier), как speedRatio в v71
+        const spdMul = 0.7 + 0.6 * clampF(this._ramp, 0, 1);
+
+        const fastT = clampF(Math.hypot(this.valueFwd, this.valueSide), 0, 1);
+        for (const [name, g] of cc.animByName) {
+            const tgt = targets.get(name) || 0;
+            const cur = this._curW.get(name) || 0;
+            const diff = tgt - cur;
+            let next;
+            if (this._snapNext) { next = tgt; }
+            else {
+                const step = dt / Math.max(0.01, diff > 0 ? MasterController._tv(P, 'fadeIn', fastT)
+                                                          : MasterController._tv(P, 'fadeOut', fastT));
+                next = Math.abs(diff) < step ? tgt : cur + Math.sign(diff) * step;
+            }
+            this._curW.set(name, next);
+            if (next > 0.005) {
+                if (!g.isStarted || !g.isPlaying) { try { g.play(true); } catch (_) {} }
+                try { g.speedRatio = spdMul; } catch (_) {}
+                this.setClipWeight(g, next);
+            } else if (cur > 0.005 && next <= 0.005) {
+                this.setClipWeight(g, 0);
+                try { g.stop(); } catch (_) {}
+            }
+        }
+        this._snapNext = false;
+    }
+    clipBlendActive() {
+        const cc = this.cc;
+        return this.clipMode === 'chains' && this.modeBindings[this.mode] &&
+               !cc.ragdollActive && this.state !== 'FALLING' && !this.batchCalibrating;
+    }
+    _stateClipName() {
+        if (this.state === 'FALLING') return (this.groups.fall || this.groups.idle)?.name || null;
+        if (this.state === 'RUNNING') return (this.groups.run || this.groups.walk || this.groups.idle)?.name || null;
+        if (this.state === 'WALKING') return (this.groups.walk || this.groups.idle)?.name || null;
+        return this.groups.idle?.name || null;
     }
 
     _depth(b) { let d = 0, pp = b.getParent(); while (pp) { d++; pp = pp.getParent(); } return d; }
@@ -508,15 +761,20 @@ class MasterController {
         const fwd = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
         const side = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
         if (!fwd && !side) return { moveDir: BABYLON.Vector3.Zero(), running: false, moving: false };
+        // v71: A/D в не-strafe режимах — поворот корпуса, а не боковое движение
+        const strafeMode = this.clipMode === 'chains' && this.mode === 'strafe';
+        if (!strafeMode && Math.abs(fwd) < 0.01 && Math.abs(side) > 0.01) {
+            return { moveDir: new BABYLON.Vector3(0, 0, 1), turnOnly: -side, running: keys.has('ShiftLeft') || keys.has('ShiftRight'), moving: true };
+        }
         const cam = cc.camera;
         const camDir = cam.getForwardRay().direction.clone();
         camDir.y = 0;
         if (camDir.lengthSquared() < 1e-6) camDir.set(0, 0, -1);
         camDir.normalize();
         const camRight = BABYLON.Vector3.Cross(camDir, new BABYLON.Vector3(0, 1, 0)).normalize();
-        const moveDir = camDir.scale(fwd).add(camRight.scale(side));
+        const moveDir = camDir.scale(fwd).add(camRight.scale(strafeMode ? side : 0));
         if (moveDir.lengthSquared() < 1e-8) moveDir.set(0, 0, 1);
-        return { moveDir: moveDir.normalize(), running: keys.has('ShiftLeft') || keys.has('ShiftRight'), moving: true };
+        return { moveDir: moveDir.normalize(), turnOnly: strafeMode ? 0 : -side, running: keys.has('ShiftLeft') || keys.has('ShiftRight'), moving: true };
     }
 
     update(dt, t) {
@@ -524,21 +782,161 @@ class MasterController {
         if (!this.mesh || !cc.rootRef) return;
         const pos = this.mesh.position;
 
-        // Опора под мастером
+        // Опора под мастером (+ уклон v71: два луча «под» и «впереди по forward»)
         const ray = new BABYLON.Ray(pos.add(new BABYLON.Vector3(0, 0.35, 0)), new BABYLON.Vector3(0, -1, 0), 6);
         const hit = cc.scene.pickWithRay(ray, cc.supportPredicate);
         let groundY = 0;
         if (hit && hit.hit && hit.pickedPoint) groundY = hit.pickedPoint.y;
         this.grounded = (pos.y - groundY) < P.groundDistance + 0.15;
+        // slopeGrad (port updateSlope): подъём >0 → тормозит, спуск <0 → разгоняет
+        {
+            const fvX = Math.sin(this.yaw), fvZ = Math.cos(this.yaw);
+            const ay = cc.raycastSupportY(pos.x + fvX * 0.8, pos.z + fvZ * 0.8, pos.y + 1.5);
+            const by = cc.raycastSupportY(pos.x - fvX * 0.8, pos.z - fvZ * 0.8, pos.y + 1.5);
+            if (ay !== null && by !== null) {
+                const gRaw = (ay - by) / 1.6;
+                const k = 1 - fastNegExp(dt / 0.25);
+                this.slopeGrad += (gRaw - this.slopeGrad) * k;
+            } else this.slopeGrad *= (1 - Math.min(1, dt * 4));
+        }
+        // zoneMul: внешние зоны скорости (из health/stamina/AI — аналог updateZone в v71)
+        this.zoneMul = clampF(cc.externalSpeedLimit ?? 1.0, 0, 2);
 
         let intent = this.getIntent();
         // Batch-калибровка профилей: мастер играет клип на месте, locomotion заморожен
         if (this.batchCalibrating) intent = { moveDir: BABYLON.Vector3.Zero(), running: false, moving: false };
-        this.state = !this.grounded ? 'FALLING' : (intent.moving ? (intent.running ? 'RUNNING' : 'WALKING') : 'IDLE');
+
+        // --- v71 input smoothing: rawWASD/AI → inputFwd/inputSide (τ=inputSmoothTau) ---
+        {
+            let rawF = 0, rawS = 0;
+            if (intent.moving) {
+                if (this.clipMode === 'chains') {
+                    // v71-модель: W/S — fwd-компонента ввода, A/D — side (strafe) или поворот
+                    const cam = cc.camera;
+                    const camDir = cam.getForwardRay().direction.clone(); camDir.y = 0;
+                    if (camDir.lengthSquared() < 1e-6) camDir.set(0, 0, -1); camDir.normalize();
+                    const camRight = BABYLON.Vector3.Cross(camDir, new BABYLON.Vector3(0, 1, 0)).normalize();
+                    rawF = BABYLON.Vector3.Dot(intent.moveDir, camDir);
+                    rawS = intent.turnOnly ? 0 : BABYLON.Vector3.Dot(intent.moveDir, camRight);
+                    const m = Math.hypot(rawF, rawS);
+                    if (m > 1) { rawF /= m; rawS /= m; }
+                } else {
+                    // legacy-режим: направление intent сразу задаёт и движение, и yaw
+                    rawF = 1 * (BABYLON.Vector3.Dot(intent.moveDir, this.forwardVec) >= 0 ? 1 : -1);
+                    rawF = intent.running ? rawF : rawF * 0.5;
+                    rawS = 0;
+                }
+            }
+            const kIn = 1 - fastNegExp(dt / Math.max(1e-3, P.inputSmoothTau ?? 0.1));
+            this.inputFwd += (rawF - this.inputFwd) * kIn;
+            this.inputSide += (rawS - this.inputSide) * kIn;
+            if (Math.abs(this.inputFwd) < 0.01) this.inputFwd = 0;
+            if (Math.abs(this.inputSide) < 0.01) this.inputSide = 0;
+        }
+
+        // --- v71 rampT/sprintT с блокировками спринта ---
+        const inMove = Math.abs(this.inputFwd) > 0.1;
+        const slowZone = this.zoneMul < P.sprintBlockZone;
+        const steepUphill = this.slopeGrad > P.sprintBlockSlope;
+        this.sprintBlocked = slowZone || steepUphill;
+        const sprintAllowed = intent.running && !this.sprintBlocked;
+        const baseMax = sprintAllowed ? 1.0 : P.rampMaxNoShift;
+        const sfac = P.slopeFactor ?? 1.35;
+        const slopeBoost = -this.slopeGrad * sfac;                       // знак сам рулит: спуск(+grad<0)→boost>0
+        const zoneBoost = this.zoneMul > 1 ? (this.zoneMul - 1) * 0.35 : (this.zoneMul - 1) * 0.5;
+        const targetRampMax = clampF(baseMax + slopeBoost + zoneBoost, 0, 1);
+        const dampUp = 1 - fastNegExp(dt / Math.max(0.1, P.rampUpTime));
+        const dampDn = 1 - fastNegExp(dt / Math.max(0.1, P.rampDownTime));
+        if (inMove) this.rampT += (targetRampMax - this.rampT) * dampUp;
+        else this.rampT += (0 - this.rampT) * dampDn;
+        this.rampT = clampF(this.rampT, 0, 1);
+        if (sprintAllowed) this.sprintT = clampF(this.sprintT + dt / Math.max(0.1, P.sprintRampTime), 0, 1);
+        else {
+            const dr = intent.running ? dt / Math.max(0.1, P.sprintRampTime * 1.5)
+                                      : dt / Math.max(0.1, P.rampDownTime * 0.5);
+            this.sprintT = clampF(this.sprintT - dr, 0, 1);
+        }
+
+        // --- auto-injured (v71): низкая скорость + замедленная зона → injured chain ---
+        if (P.autoInjured && !cc.ragdollActive && this.modeBindings.injured && this.state !== 'FALLING') {
+            const injSpeed = lerpF(P.walkSpeed * 0.2, P.walkSpeed * 0.45, 0.5);
+            const speedLow = this.speed < injSpeed;
+            const wantInjured = speedLow && this.zoneMul < (P.injuredEnterZone ?? 0.45);
+            if (this.mode !== 'injured' && wantInjured) { this.setMode('injured'); this.autoInjuredActive = true; }
+            else if (this.mode === 'injured' && this.autoInjuredActive && this.zoneMul >= (P.injuredExitZone ?? 0.7)) {
+                this.setMode(this.prevMode || 'loco'); this.autoInjuredActive = false;
+            }
+        }
+
+        // --- valueFwd/valueSide (port v71): tiers × ramp × totalMul → координаты поля ---
+        {
+            const b = this.modeBindings[this.mode];
+            const cF = b ? this.getChain(b.fwdId) : null;
+            const cB = b && b.backId ? this.getChain(b.backId) : null;
+            const cS = b && b.sideIds ? this.getChain(b.sideIds[1]) : null;   // right-цепь задаёт sideRange
+            const tiers = this.chainTiers(cF);
+            const range = { min: cB && cB.length ? cB[cB.length - 1].center : 0, max: (cF && cF.length ? cF[cF.length - 1].center : 0) };
+            const sideRange = cS && cS.length ? Math.max(...cS.map(k => Math.abs(k.center))) : 0.6;
+            const slopeMul = clampF(1 - this.slopeGrad * sfac, 0.4, 2.0);
+            let zoneEff = this.zoneMul;
+            if (intent.running && zoneEff < 1) zoneEff = 1 + (zoneEff - 1) * (P.shiftPierce ?? 0.5);
+            const modeMul = (P.modeSpeedMul || {})[this.mode] ?? 1;
+            const rampE = smoothstep01(this.rampT), sprE = smoothstep01(this.sprintT);
+            const effRamp = Math.max(rampE, sprE);
+            const rampCenterAdj = tiers.walk + (tiers.run - tiers.walk) * effRamp;
+            const curCenter = rampCenterAdj * (1 - sprE) + tiers.sprint * sprE;
+            const totalMul = slopeMul * zoneEff * modeMul;
+            let targetFwd = 0;
+            if (inMove) {
+                const rawF = Math.sign(this.inputFwd) * Math.abs(this.inputFwd) * curCenter * totalMul;
+                targetFwd = clampF(rawF, range.min, range.max);
+            }
+            const targetSide = (this.mode === 'strafe') ? this.inputSide * sideRange : 0;
+            const hasInput = Math.abs(targetFwd) > 0.02 || Math.abs(targetSide) > 0.02;
+            const tauV = MasterController._tv(P, hasInput ? 'valueUp' : 'valueDown', clampF(Math.hypot(targetFwd, targetSide), 0, 1));
+            const kV = 1 - fastNegExp(dt / Math.max(0.01, tauV));
+            this.valueFwd += (targetFwd - this.valueFwd) * kV;
+            this.valueSide += (targetSide - this.valueSide) * kV;
+            if (!hasInput) {
+                if (Math.abs(this.valueFwd) < 0.02) this.valueFwd = 0;
+                if (Math.abs(this.valueSide) < 0.02) this.valueSide = 0;
+            }
+            this.valueFwd = clampF(this.valueFwd, range.min, range.max);
+            // физическая скорость мастера: |valueFwd|/maxCenter × walk/run-скорость
+            const maxC = Math.max(0.05, range.max);
+            const spdBase = this.state === 'RUNNING' ? P.runSpeed : P.walkSpeed;
+            this.speedTarget = clampF(Math.abs(this.valueFwd) / maxC, 0, 1.25) * spdBase * (sprE > 0.5 ? 1.15 : 1);
+            if (this.valueFwd < -0.02) this.speedTarget = -this.speedTarget;
+        }
+
+        // состояние для slave/IK/FALLING
+        this.state = !this.grounded ? 'FALLING' : (Math.abs(this.valueFwd) > 0.05 || Math.abs(this.valueSide) > 0.05
+            ? (this.sprintT > 0.5 ? 'RUNNING' : 'WALKING') : 'IDLE');
         if (this.state !== 'FALLING') this.fallVel = 0;
 
-        // Поворот к направлению движения (плавно, shortest arc)
-        if (intent.moving) {
+        // --- поворот (port v71): strafe — доворачивание к камере, иначе A/D-поворот ---
+        if (this.clipMode === 'chains') {
+            const turnOnly = intent.turnOnly || 0;
+            if (this.mode === 'strafe' && intent.moving) {
+                const camDir = cc.camera.getForwardRay().direction.clone(); camDir.y = 0;
+                if (camDir.lengthSquared() < 1e-6) camDir.set(0, 0, -1); camDir.normalize();
+                const camYaw = Math.atan2(camDir.x, camDir.z);
+                let d = camYaw - this.yaw;
+                while (d > Math.PI) d -= 2 * Math.PI;
+                while (d < -Math.PI) d += 2 * Math.PI;
+                this.yaw += d * (1 - fastNegExp(dt / 0.2));
+            } else if (intent.moving && Math.abs(turnOnly) > 0.03) {
+                // v71: M.yaw -= inputX*turnSpeed*dt (A/D поворачивают корпус в loco/crouch/injured)
+                const turnSpd = lerpF(Math.PI * 0.55, Math.PI * 1.45, clampF(this._ramp, 0, 1));
+                this.yaw -= turnOnly * turnSpd * dt;
+            } else if (intent.moving) {
+                const targetYaw = Math.atan2(
+                    BABYLON.Vector3.Cross(cc.LM.forward, intent.moveDir).y,
+                    BABYLON.Vector3.Dot(cc.LM.forward, intent.moveDir)
+                );
+                this.yaw = smoothDampAngle(this.yaw, targetYaw, dt, P.turnSmoothTime);
+            }
+        } else if (intent.moving) {
             const targetYaw = Math.atan2(
                 BABYLON.Vector3.Cross(cc.LM.forward, intent.moveDir).y,
                 BABYLON.Vector3.Dot(cc.LM.forward, intent.moveDir)
@@ -560,38 +958,43 @@ class MasterController {
         if (this.state === 'FALLING') {
             this.fallVel -= P.gravity * dt;
             pos.y += this.fallVel * dt;
-        } else if (this.state === 'IDLE') {
+            this.speedTarget = 0;
+        } else if (Math.abs(this.speedTarget) < 0.01 && Math.abs(this.inputFwd) < 0.05) {
             pos.addInPlace(pushVec.scale(P.pushBackSpeed * pushScale * dt));
         } else {
-            const baseSpeed = this.state === 'RUNNING' ? P.runSpeed : P.walkSpeed;
-            const speedLimit = cc.externalSpeedLimit ?? 1.0;
-            // ramp-масштаб (v71): плавный разгон/торможение мастера вместо мгновенного on/off
-            const rampScale = lerpF(0.35, 1.0, this._ramp);
-            const forward = intent.moveDir.scale(baseSpeed * speedLimit * masterMoveScale * rampScale);
+            // v71: скорость мастера из ramp-значения valueFwd (вперёд/назад по yaw)
+            const spd = this.speedTarget * masterMoveScale;
+            const dirX = Math.sin(this.yaw), dirZ = Math.cos(this.yaw);
+            const forward = new BABYLON.Vector3(dirX * spd, 0, dirZ * spd);
             // Support guard: мастер не шагает на поверхность выше maxStepHeight
             if (cc.supportGuard && forward.lengthSquared() > 1e-8) {
-                const dirN = intent.moveDir.clone(); dirN.normalize();
-                const aheadY = cc.raycastSupportY(pos.x + dirN.x * 0.5, pos.z + dirN.z * 0.5, pos.y + 1.5);
+                const aheadY = cc.raycastSupportY(pos.x + dirX * 0.5, pos.z + dirZ * 0.5, pos.y + 1.5);
                 if (aheadY !== null && aheadY - groundY > P.maxStepHeight) forward.set(0, 0, 0);
             }
             const back = pushVec.scale(P.pushBackSpeed * pushScale);
             pos.addInPlace(forward.add(back).scale(dt));
         }
 
+        // speed → speedTarget с демпфом (port v71 sf2=dampFactor(dt,0.2))
+        {
+            const kS = 1 - fastNegExp(dt / 0.2);
+            this.speed += (this.speedTarget - this.speed) * kS;
+            if (Math.abs(this.speed - this.speedTarget) < 0.01) this.speed = this.speedTarget;
+        }
+
         const floorY = groundY + P.groundDistance + this.bobY;
         if (pos.y < floorY) { pos.y = floorY; this.fallVel = 0; }
         else if (this.grounded) pos.y = lerpF(pos.y, floorY, Math.min(1, dt * 12));
 
-        // обновляем IDW-поле по фактическому перемещению мастера
-        if (this._lastPosForField == null) this._lastPosForField = pos.clone();
-        const fdx = (pos.x - this._lastPosForField.x) / Math.max(1e-4, dt);
-        const fdz = (pos.z - this._lastPosForField.z) / Math.max(1e-4, dt);
-        this._lastPosForField.copyFrom(pos);
-        this.updateBlendField(dt, fdx, fdz);
-        // v71 ramp: без ввода скорость плавно гаснет за rampDownTime
-        if (!intent.moving && !this.batchCalibrating) {
-            this._ramp -= this._ramp * Math.min(1, dt / Math.max(1e-3, P.rampDownTime));
-            if (this._ramp < 0.001) this._ramp = 0;
+        // --- blend-поле цепей (v71): сглаженные valueFwd/valueSide в осях мастера ---
+        // (_fwdS/_sideS — координаты точки поля для computeContribs)
+        {
+            const bK = 1 - fastNegExp(dt / Math.max(1e-3, P.masterBlendTau ?? 0.05));
+            this._fwdS += (this.valueFwd - this._fwdS) * bK;
+            this._sideS += (this.valueSide - this._sideS) * bK;
+            // _ramp (обратная совместимость HUD/state): нормализованная величина поля
+            const refMax = Math.max(0.05, (this.chains.locoFwd.length ? this.chains.locoFwd[this.chains.locoFwd.length - 1].center : P.runSpeed));
+            this._ramp += (clampF(Math.hypot(this._fwdS, this._sideS) / refMax, 0, 1) - this._ramp) * Math.min(1, dt / Math.max(1e-3, P.rampUpTime));
         }
         this.speedScale = clampF(this._ramp, 0, 1);
         // world-forward мастера (для предикции посадочной точки стоп)
@@ -606,6 +1009,23 @@ class MasterController {
     animate(dt, t) {
         const cc = this.cc;
         if (!this.mesh || !this.skeleton) return;
+        if (this.clipMode === 'chains') {
+            // --- v71: blend 5 цепей через веса клипов (port applyWeights + setGroupWeight) ---
+            this.applyWeights(dt);
+            // activeAnimName для foot-профилей/IK — самый «тяжёлый» не-idle клип
+            let best = null, bw = 0.05;
+            for (const [name, w] of this._curW) {
+                if (w > bw && !(this.modeBindings[this.mode] && name === this.idleAnimName())) { best = name; bw = w; }
+            }
+            if (!best) best = this.idleAnimName();
+            if (best && best !== this._curClipName) {
+                this._curClipName = best;
+                cc.masterFeet.activeAnimName = best;
+                // resetOnAnimSwitch() при бленде НЕ вызываем — стопы доезжают по инерции
+            }
+            this.bobY = 0;
+            return;
+        }
         if (this.mode === 'groups') {
             let want = this.groups.idle;
             if (this.state === 'FALLING') want = this.groups.fall || this.groups.idle;
@@ -2042,7 +2462,7 @@ export class CharacterController {
         if (!this.colliderRefs.length || !this.master.mesh || dt <= 0) return;
         // master-layer v71: веса клипов мастера масштабируются на followingScale (плавное гашение анимации при потере стабильности),
         // в ragdoll скелет мастера замораживается в rest-позе (slave живёт только физикой).
-        if (P.masterClipWeightScale && this.master.mode === 'groups') {
+        if (P.masterClipWeightScale && this.master.mode === 'groups' && this.master.clipMode !== 'chains') {
             const ws = clampF(this.followingScale, 0, 1);
             for (const g of this.animationGroups) {
                 try {
@@ -2446,6 +2866,16 @@ export class CharacterController {
             followErrRot: this.followErrRot,
             guardClamped: this.guardClamped,
             masterRamp: this.master._ramp ?? 0,
+            // v71-телеметрия цепей/блендинга
+            locoMode: this.master.mode || 'loco',
+            clipMode: this.master.clipMode || 'procedural',
+            valueFwd: this.master.valueFwd ?? 0,
+            valueSide: this.master.valueSide ?? 0,
+            sprintT: this.master.sprintT ?? 0,
+            slopeGrad: this.master.slopeGrad ?? 0,
+            zoneMul: this.master.zoneMul ?? 1,
+            chains: Object.fromEntries(Object.entries(this.master.chains || {}).map(([k, v]) => [k, v.length])),
+            blendWeights: (() => { const o = {}; for (const [n, w] of (this.master._curW || [])) if (w > 0.02) o[n] = +w.toFixed(2); return o; })(),
             calibrating: !!this.master.batchCalibrating,
             calibratedProfiles: this.masterFeet.profiles.size,
         };
