@@ -294,7 +294,9 @@ class JointAxes {
         if (right.lengthSquared() < 1e-6) right = new BABYLON.Vector3(1, 0, 0);
         right.normalize();
         const forward = BABYLON.Vector3.Cross(up, right).normalize();
-        return { up, right, forward, center };
+        // yaw-угол world-forward в rest-позе: мастер поворачивается на this.yaw от этой базы
+        const forwardAngleYaw = Math.atan2(forward.x, forward.z);
+        return { up, right, forward, center, forwardAngleYaw };
     }
 
     static build(ref, LM, mesh, excludeBones) {
@@ -364,6 +366,12 @@ class MasterController {
         this.restQuat = new Map();
         this.boneOrder = [];
         this.worldQ = new Map();
+        // --- master-layer v71 (deepseek_html_20261028_644a29.html) ---
+        this.batchCalibrating = false;   // на время batch-калибровки locomotion заморожен
+        this._curClipName = '';          // имя текущего проигрываемого клипа
+        this._field = { fwd: 0, side: 0 }; // IDW-поле анимаций (blend field)
+        this._fwdS = 0; this._sideS = 0;   // сглаженные оси движения
+        this._ramp = 0;                    // 0..1 плавная смена скорости локомоции
     }
 
     create(sourceMesh, skeleton, animGroups, LM) {
@@ -418,9 +426,68 @@ class MasterController {
             else if (/fall|jump|air|float/i.test(n) && !this.groups.fall) this.groups.fall = g;
         }
         this.mode = (this.groups.idle && (this.groups.walk || this.groups.run)) ? 'groups' : 'procedural';
+
+        // name → group (для калибровки профилей MasterFootSystem и blend-поля)
+        cc.animByName = new Map();
+        for (const g of (animGroups || [])) cc.animByName.set(g.name, g);
+        // world-forward мастера (идея оригинала: forward mesh'а мастера для предикции стопы)
+        this.forwardVec = new BABYLON.Vector3(0, 0, 1);
     }
 
     _depth(b) { let d = 0, pp = b.getParent(); while (pp) { d++; pp = pp.getParent(); } return d; }
+
+    // Проигрывание клипа по группе (используется MasterFootSystem при калибровке)
+    playGroup(groupOrName, loop = true) {
+        const cc = this.cc;
+        let g = groupOrName;
+        if (typeof g === 'string') g = cc.animByName.get(g);
+        if (!g) return;
+        if (this.curGroup && this.curGroup !== g) { try { this.curGroup.stop(); } catch (_) {} }
+        try { g.play(loop); } catch (_) {}
+        this.curGroup = g;
+        this._curClipName = g.name;
+        cc.masterFeet.activeAnimName = g.name;
+        cc.masterFeet.resetOnAnimSwitch();
+    }
+    stopAllGroups() {
+        for (const g of this.cc.animByName.values()) { try { g.stop(); } catch (_) {} }
+        this.curGroup = null; this._curClipName = '';
+    }
+    // Оси локального blend-поля (задаются из CharacterController: LM.forward/right)
+    setFieldAxes(fx, fz, rx, rz) { this._field.fwdAxis = [fx, fz]; this._field.sideAxis = [rx, rz]; }
+
+    // ------------------------------------------------------------------
+    // IDW gradient blend field (port идеи из deepseek_html_20261028_644a29.html):
+    // целевая точка поля = сглаженная горизонтальная скорость мастера;
+    // influence_i = (1/d_i^2)/Σ(1/d_j^2) по опорным точкам клипов;
+    // крутизна смешения — P.fieldSharpness.
+    updateBlendField(dt, vx, vz) {
+        const cc = this.cc, P = cc.params;
+        const f = this._field;
+        if (!f.fwdAxis) { f.fwdAxis = [0, 1]; f.sideAxis = [1, 0]; }
+        const tau = Math.max(1e-3, P.fieldTau ?? 0.25);
+        const k = 1 - fastNegExp(dt / tau);
+        f.fwd += ((vx * f.fwdAxis[0] + vz * f.fwdAxis[1])) * k - f.fwd * k;
+        f.side += ((vx * f.sideAxis[0] + vz * f.sideAxis[1])) * k - f.side * k;
+        const sh = Math.max(0.1, P.fieldSharpness);
+        const anchors = [[0, 0], [P.walkSpeed, 0], [P.runSpeed, 0], [P.sprintSpeed ?? P.runSpeed * 1.4, 0], [0, P.strafeSpeed ?? P.walkSpeed]];
+        let tx = f.fwd, ty = f.side;
+        const maxR = P.fieldMaxRadius ?? (P.runSpeed * 1.3);
+        const len = Math.hypot(tx, ty);
+        if (len > maxR && len > 1e-6) { tx *= maxR / len; ty *= maxR / len; }
+        let sw = 0, sx = 0, sy = 0, sc = 0;
+        for (const [ax, ay] of anchors) {
+            const d2 = (tx - ax) * (tx - ax) + (ty - ay) * (ty - ay);
+            const w = 1 / Math.pow(Math.max(d2, 1e-4), sh);
+            sw += w; sx += w * ax; sy += w * ay; sc++;
+        }
+        f.targetFwd = sw > 0 ? sx / sw : 0;
+        f.targetSide = sw > 0 ? sy / sw : 0;
+        // ramp Walk→Run→Sprint (v71): плавный переход скорости через smoothDamp
+        const targetMag = Math.hypot(f.targetFwd, f.targetSide);
+        const refMax = Math.max(0.01, P.sprintSpeed ?? P.runSpeed * 1.4);
+        this._ramp += (clampF(targetMag / refMax, 0, 1) - this._ramp) * Math.min(1, dt / Math.max(1e-3, P.rampUpTime));
+    }
 
     destroy() {
         for (const g of Object.values(this.groups)) { if (g) { try { g.stop(); } catch (_) {} } }
@@ -464,7 +531,9 @@ class MasterController {
         if (hit && hit.hit && hit.pickedPoint) groundY = hit.pickedPoint.y;
         this.grounded = (pos.y - groundY) < P.groundDistance + 0.15;
 
-        const intent = this.getIntent();
+        let intent = this.getIntent();
+        // Batch-калибровка профилей: мастер играет клип на месте, locomotion заморожен
+        if (this.batchCalibrating) intent = { moveDir: BABYLON.Vector3.Zero(), running: false, moving: false };
         this.state = !this.grounded ? 'FALLING' : (intent.moving ? (intent.running ? 'RUNNING' : 'WALKING') : 'IDLE');
         if (this.state !== 'FALLING') this.fallVel = 0;
 
@@ -496,7 +565,9 @@ class MasterController {
         } else {
             const baseSpeed = this.state === 'RUNNING' ? P.runSpeed : P.walkSpeed;
             const speedLimit = cc.externalSpeedLimit ?? 1.0;
-            const forward = intent.moveDir.scale(baseSpeed * speedLimit * masterMoveScale);
+            // ramp-масштаб (v71): плавный разгон/торможение мастера вместо мгновенного on/off
+            const rampScale = lerpF(0.35, 1.0, this._ramp);
+            const forward = intent.moveDir.scale(baseSpeed * speedLimit * masterMoveScale * rampScale);
             // Support guard: мастер не шагает на поверхность выше maxStepHeight
             if (cc.supportGuard && forward.lengthSquared() > 1e-8) {
                 const dirN = intent.moveDir.clone(); dirN.normalize();
@@ -511,6 +582,22 @@ class MasterController {
         if (pos.y < floorY) { pos.y = floorY; this.fallVel = 0; }
         else if (this.grounded) pos.y = lerpF(pos.y, floorY, Math.min(1, dt * 12));
 
+        // обновляем IDW-поле по фактическому перемещению мастера
+        if (this._lastPosForField == null) this._lastPosForField = pos.clone();
+        const fdx = (pos.x - this._lastPosForField.x) / Math.max(1e-4, dt);
+        const fdz = (pos.z - this._lastPosForField.z) / Math.max(1e-4, dt);
+        this._lastPosForField.copyFrom(pos);
+        this.updateBlendField(dt, fdx, fdz);
+        // v71 ramp: без ввода скорость плавно гаснет за rampDownTime
+        if (!intent.moving && !this.batchCalibrating) {
+            this._ramp -= this._ramp * Math.min(1, dt / Math.max(1e-3, P.rampDownTime));
+            if (this._ramp < 0.001) this._ramp = 0;
+        }
+        this.speedScale = clampF(this._ramp, 0, 1);
+        // world-forward мастера (для предикции посадочной точки стоп)
+        const fwdYaw = cc.LM.forwardAngleYaw || 0;
+        this.forwardVec.set(Math.sin(this.yaw + fwdYaw), 0, Math.cos(this.yaw + fwdYaw));
+
         this.animate(dt, t);
         try { this.mesh.computeWorldMatrix(true); } catch (_) {}
         try { this.skeleton.computeAbsoluteMatrices(); } catch (_) {}
@@ -524,7 +611,11 @@ class MasterController {
             if (this.state === 'FALLING') want = this.groups.fall || this.groups.idle;
             else if (this.state === 'RUNNING') want = this.groups.run || this.groups.walk || this.groups.idle;
             else if (this.state === 'WALKING') want = this.groups.walk || this.groups.idle;
+            // калибровочный клип имеет приоритет, пока batch идёт
+            if (this.batchCalibrating && this.curGroup) want = this.curGroup;
             if (want && this.curGroup !== want) {
+                cc.masterFeet.activeAnimName = want.name;
+                cc.masterFeet.resetOnAnimSwitch();
                 if (this.curGroup) { try { this.curGroup.stop(); } catch (_) {} }
                 try { want.play(true); } catch (_) {}
                 this.curGroup = want;
@@ -1060,6 +1151,7 @@ class MasterFootSystem {
     }
     startBatchCalibration() {
         const cc = this.cc;
+        if (!this.enabled || Object.keys(this.legs).length === 0) return; // ноги ещё не собраны — см. autoStartCalibration
         const queue = [...cc.animByName.keys()].filter(n => !this.profiles.has(n));
         if (!queue.length) return;
         this._batch = { queue, idx: 0 };
@@ -1080,7 +1172,7 @@ class MasterFootSystem {
     _playMasterClip(name, loop) {
         const g = this.cc.animByName.get(name);
         if (!g) return;
-        this.cc.master.playGroup(g, loop);
+        try { this.cc.master.playGroup(g, loop); } catch (_) {}
     }
     getActiveProfile() {
         const name = this.activeAnimName;
@@ -1274,6 +1366,8 @@ export class CharacterController {
 
         // Состояние мира ввода
         this.keys = new Set();
+        this._ZERO = BABYLON.Vector3.Zero();   // общий нулевой вектор (контакты MasterFootSystem)
+        this.animByName = new Map();            // name → AnimationGroup (калибровка профилей, blend-поле)
         this.externalIntent = null;         // {dir:Vector3, running:bool} — directive от AI
         this.externalSpeedLimit = null;     // idea from movement.js
         this.additionalMasterOffsets = null;// опциональные additive-позы (KRL-стиль)
@@ -1328,6 +1422,12 @@ export class CharacterController {
         const scene = this.scene;
         this.LM = JointAxes.computeLandmarks(this.skelRef, this.skinnedMesh, this.excludeBones);
 
+        // Мастер-ноги инициализируются ДО создания мастера: playGroup при выборе клипа
+        // вызывает masterFeet.resetOnAnimSwitch(), поле должно существовать.
+        const ikOnEarly = (this.options.ik && this.options.ik.enabled !== undefined)
+            ? !!this.options.ik.enabled : !!this.params.ikEnabled;
+        if (ikOnEarly) this.masterFeet.enabled = true;   // setup() соберёт ноги после ragdoll
+
         // Мастер (полупрозрачный аватар-цель)
         this.master.create(this.skinnedMesh, this.skelRef, this.animationGroups, this.LM);
 
@@ -1345,6 +1445,9 @@ export class CharacterController {
         // Главный цикл
         const syncObserver = scene.onBeforeRenderObservable.add(() => this._tick());
         this._observers.push(syncObserver);
+
+        // Batch-калибровка профилей клипов (мастер играет клипы на месте, locomotion заморожен)
+        this.autoStartCalibration();
     }
 
     _createRagdoll() {
@@ -1937,6 +2040,25 @@ export class CharacterController {
     _followAnimation(dt) {
         const P = this.params;
         if (!this.colliderRefs.length || !this.master.mesh || dt <= 0) return;
+        // master-layer v71: веса клипов мастера масштабируются на followingScale (плавное гашение анимации при потере стабильности),
+        // в ragdoll скелет мастера замораживается в rest-позе (slave живёт только физикой).
+        if (P.masterClipWeightScale && this.master.mode === 'groups') {
+            const ws = clampF(this.followingScale, 0, 1);
+            for (const g of this.animationGroups) {
+                try {
+                    if (g.weight !== undefined) g.weight = ws;
+                    else for (const anim of g.animatables ?? []) if (anim.weight !== undefined) anim.weight = ws;
+                } catch (_) {}
+            }
+        }
+        if (P.freezeMasterOnRagdoll && this.ragdollActive && this.master.skeleton) {
+            // rest-поза: локальные матрицы из restLocalMatrix скинета-референса неприменимы к мастеру —
+            // просто ставим identity-additive поверх rest (restQuat уже сохранён в MasterController.create)
+            for (const [bone, qRest] of this.master.restQuat.entries()) {
+                try { bone.setRotationQuaternion(qRest, BABYLON.Space.LOCAL); } catch (_) {}
+            }
+            try { this.master.skeleton.computeAbsoluteMatrices(); } catch (_) {}
+        }
         if (!this.slaveAlive) return;
 
         const mScale = this.master.mesh.scaling.x || 1;
@@ -2155,6 +2277,13 @@ export class CharacterController {
 
         // 2) Мастер: locomotion + анимация
         this.master.update(dt, t);
+        // калибровка профилей клипов (онлайн-сбор статистики + batch-очередь)
+        if (this.masterFeet.enabled) {
+            this.masterFeet.calibrationTick();
+            if (this.master.batchCalibrating && !this.masterFeet._calib && !this.masterFeet._batch) {
+                this.master.batchCalibrating = false;   // очередь пуста — возвращаем locomotion
+            }
+        }
 
         // 3) Slave: веса → приводы → баланс → IK
         if (this.activeEnabled) {
@@ -2185,6 +2314,17 @@ export class CharacterController {
     }
 
     // ------------------------------------------------------------------ публичный API
+    // world-forward мастера по XZ (используется MasterFootSystem для предикции посадки)
+    masterForwardXZ() {
+        const fv = this.master.forwardVec || BABYLON.Vector3.Forward();
+        return { x: fv.x, z: fv.z };
+    }
+    // Запуск пакетной калибровки профилей всех клипов (идея 1c9eff): мастер играет клипы на месте
+    startCalibrationBatch() {
+        this.master.batchCalibrating = true;
+        this.masterFeet.startBatchCalibration();
+    }
+
     setIntent(dirVector3, running = false) {
         this.externalIntent = dirVector3 && dirVector3.lengthSquared() > 1e-6
             ? { dir: new BABYLON.Vector3(dirVector3.x, 0, dirVector3.z), running }
@@ -2192,6 +2332,10 @@ export class CharacterController {
     }
     clearIntent() { this.externalIntent = null; }
     setSpeedLimit(v) { this.externalSpeedLimit = v; }
+    // Автозапуск batch-калибровки после полной сборки контроллера
+    autoStartCalibration() {
+        if (this.options.autoCalibrate !== false && this.masterFeet.enabled) this.masterFeet.startBatchCalibration();
+    }
 
     setParam(key, value) {
         this.params[key] = value;
@@ -2301,6 +2445,9 @@ export class CharacterController {
             followErrPos: this.followErrPos,
             followErrRot: this.followErrRot,
             guardClamped: this.guardClamped,
+            masterRamp: this.master._ramp ?? 0,
+            calibrating: !!this.master.batchCalibrating,
+            calibratedProfiles: this.masterFeet.profiles.size,
         };
     }
 
