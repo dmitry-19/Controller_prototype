@@ -710,36 +710,27 @@ class MasterController {
     setFieldAxes(fx, fz, rx, rz) { this._field.fwdAxis = [fx, fz]; this._field.sideAxis = [rx, rz]; }
 
     // ------------------------------------------------------------------
-    // IDW gradient blend field (port идеи из deepseek_html_20261028_644a29.html):
-    // целевая точка поля = сглаженная горизонтальная скорость мастера;
-    // influence_i = (1/d_i^2)/Σ(1/d_j^2) по опорным точкам клипов;
-    // крутизна смешения — P.fieldSharpness.
-    updateBlendField(dt, vx, vz) {
-        const cc = this.cc, P = cc.params;
+    // Legacy-вспомогательная функция: IDW-сглаживание вектора world-скорости мастера
+    // в локальные оси blend-поля (fwd/side). Используется только для диагностики и
+    // обратной совместимости; основной путь поля — valueFwd/valueSide → _fwdS/_sideS.
+    projectVelocityToField(vx, vz) {
         const f = this._field;
         if (!f.fwdAxis) { f.fwdAxis = [0, 1]; f.sideAxis = [1, 0]; }
-        const tau = Math.max(1e-3, P.fieldTau ?? 0.25);
-        const k = 1 - fastNegExp(dt / tau);
-        f.fwd += ((vx * f.fwdAxis[0] + vz * f.fwdAxis[1])) * k - f.fwd * k;
-        f.side += ((vx * f.sideAxis[0] + vz * f.sideAxis[1])) * k - f.side * k;
-        const sh = Math.max(0.1, P.fieldSharpness);
-        const anchors = [[0, 0], [P.walkSpeed, 0], [P.runSpeed, 0], [P.sprintSpeed ?? P.runSpeed * 1.4, 0], [0, P.strafeSpeed ?? P.walkSpeed]];
-        let tx = f.fwd, ty = f.side;
-        const maxR = P.fieldMaxRadius ?? (P.runSpeed * 1.3);
-        const len = Math.hypot(tx, ty);
-        if (len > maxR && len > 1e-6) { tx *= maxR / len; ty *= maxR / len; }
-        let sw = 0, sx = 0, sy = 0, sc = 0;
-        for (const [ax, ay] of anchors) {
-            const d2 = (tx - ax) * (tx - ax) + (ty - ay) * (ty - ay);
-            const w = 1 / Math.pow(Math.max(d2, 1e-4), sh);
-            sw += w; sx += w * ax; sy += w * ay; sc++;
-        }
-        f.targetFwd = sw > 0 ? sx / sw : 0;
-        f.targetSide = sw > 0 ? sy / sw : 0;
-        // ramp Walk→Run→Sprint (v71): плавный переход скорости через smoothDamp
-        const targetMag = Math.hypot(f.targetFwd, f.targetSide);
-        const refMax = Math.max(0.01, P.sprintSpeed ?? P.runSpeed * 1.4);
-        this._ramp += (clampF(targetMag / refMax, 0, 1) - this._ramp) * Math.min(1, dt / Math.max(1e-3, P.rampUpTime));
+        return { fwd: vx * f.fwdAxis[0] + vz * f.fwdAxis[1], side: vx * f.sideAxis[0] + vz * f.sideAxis[1] };
+    }
+    updateBlendField(dt, vx, vz) {
+        const P = this.cc.params;
+        const f = this._field;
+        const pr = this.projectVelocityToField(vx, vz);
+        const tau = Math.max(1e-3, P.inputSmoothTau ?? 0.1);
+        const k = dampF(dt, tau);
+        f.fwd += (pr.fwd - f.fwd) * k;
+        f.side += (pr.side - f.side) * k;
+        const maxR = Math.max(0.5, P.runSpeed * 1.4);
+        let len = Math.hypot(f.fwd, f.side);
+        if (len > maxR && len > 1e-6) { f.fwd *= maxR / len; f.side *= maxR / len; }
+        f.targetFwd = f.fwd;
+        f.targetSide = f.side;
     }
 
     destroy() {
@@ -763,6 +754,7 @@ class MasterController {
         if (!fwd && !side) return { moveDir: BABYLON.Vector3.Zero(), running: false, moving: false };
         // v71: A/D в не-strafe режимах — поворот корпуса, а не боковое движение
         const strafeMode = this.clipMode === 'chains' && this.mode === 'strafe';
+        // В не-strafe режимах чистый поворот (только A/D) — без движения вперёд (v71 wasOnlyTurn)
         if (!strafeMode && Math.abs(fwd) < 0.01 && Math.abs(side) > 0.01) {
             return { moveDir: new BABYLON.Vector3(0, 0, 1), turnOnly: -side, running: keys.has('ShiftLeft') || keys.has('ShiftRight'), moving: true };
         }
@@ -771,7 +763,8 @@ class MasterController {
         camDir.y = 0;
         if (camDir.lengthSquared() < 1e-6) camDir.set(0, 0, -1);
         camDir.normalize();
-        const camRight = BABYLON.Vector3.Cross(camDir, new BABYLON.Vector3(0, 1, 0)).normalize();
+        // camera-right = cross(up, camDir): D → право камеры (совпадает с v71 dx=cos(camYaw)*inputX)
+        const camRight = BABYLON.Vector3.Cross(new BABYLON.Vector3(0, 1, 0), camDir).normalize();
         const moveDir = camDir.scale(fwd).add(camRight.scale(strafeMode ? side : 0));
         if (moveDir.lengthSquared() < 1e-8) moveDir.set(0, 0, 1);
         return { moveDir: moveDir.normalize(), turnOnly: strafeMode ? 0 : -side, running: keys.has('ShiftLeft') || keys.has('ShiftRight'), moving: true };
@@ -803,6 +796,11 @@ class MasterController {
         this.zoneMul = clampF(cc.externalSpeedLimit ?? 1.0, 0, 2);
 
         let intent = this.getIntent();
+        // Чистый поворот (только A/D в не-strafe): движение корпуса отсутствует —
+        // иначе legacy-ветка ниже даст rawF=±1 и персонаж «поедет» при вращении на месте.
+        if (intent.turnOnly && Math.abs(intent.turnOnly) > 0.01 && this.clipMode !== 'chains') {
+            intent = { ...intent, moving: false };
+        }
         // Batch-калибровка профилей: мастер играет клип на месте, locomotion заморожен
         if (this.batchCalibrating) intent = { moveDir: BABYLON.Vector3.Zero(), running: false, moving: false };
 
@@ -815,7 +813,7 @@ class MasterController {
                     const cam = cc.camera;
                     const camDir = cam.getForwardRay().direction.clone(); camDir.y = 0;
                     if (camDir.lengthSquared() < 1e-6) camDir.set(0, 0, -1); camDir.normalize();
-                    const camRight = BABYLON.Vector3.Cross(camDir, new BABYLON.Vector3(0, 1, 0)).normalize();
+                    const camRight = BABYLON.Vector3.Cross(new BABYLON.Vector3(0, 1, 0), camDir).normalize();
                     rawF = BABYLON.Vector3.Dot(intent.moveDir, camDir);
                     rawS = intent.turnOnly ? 0 : BABYLON.Vector3.Dot(intent.moveDir, camRight);
                     const m = Math.hypot(rawF, rawS);
