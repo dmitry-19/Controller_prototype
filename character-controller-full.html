@@ -2599,7 +2599,7 @@ class CharacterController {
         $('st-follow').textContent = fmt(s.followingScale);
         $('st-str').textContent = fmt(s.strength);
         $('st-sup').textContent = s.feetSupported;
-        const L = cc.masterFeet.legs.l || {}, R = cc.masterFeet.legs.r || {};
+        const L = cc.masterFeet.legs.L || {}, R = cc.masterFeet.legs.R || {};
         $('st-ik').textContent = fmt(L.ikWeight ?? 0) + '/' + fmt(R.ikWeight ?? 0);
         $('st-blend').textContent = fmt(L.blendSmooth ?? 0) + '/' + fmt(R.blendSmooth ?? 0);
         $('st-lock').textContent = ((L.contact && L.contact.lock) ? 'Y' : '.') + '/' + ((R.contact && R.contact.lock) ? 'Y' : '.');
