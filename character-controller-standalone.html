@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>CharacterController — единый standalone (Master-Slave Ragdoll + IK + Blend Field)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<!-- Как в прототипах: babylon.js + loaders + Havok -->
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script src="https://cdn.babylonjs.com/havok/HavokPhysics_umd.js"></script>
+<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+<style>
+html, body { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:#14141f; }
+#renderCanvas { width:100%; height:100%; display:block; touch-action:none; outline:none; }
+#ui { position:absolute; top:14px; left:14px; z-index:10; display:flex; flex-direction:column; gap:5px; width:430px;
+      background:rgba(0,0,0,.88); padding:12px 14px 14px; border-radius:12px; border:1px solid rgba(255,255,255,.09);
+      max-height:calc(100vh - 28px); overflow-y:auto; font-family:sans-serif; }
+#ui input[type=range] { accent-color:#6af; }
+#status { color:#fc8; font-size:13px; white-space:pre-line; }
+#msInfo { color:#9f9; font-size:11px; font-family:monospace; margin-top:3px; line-height:1.45; min-height:60px; }
+.hdr { color:#fc8; font-size:12px; font-weight:bold; }
+.block { margin-top:7px; border-top:1px solid rgba(255,255,255,.08); padding-top:6px; }
+.srow { display:flex; gap:7px; align-items:center; margin-top:3px; }
+.srow label { color:#aac; font-size:11px; min-width:170px; }
+.srow input[type=range] { flex:1; }
+.srow .val { color:#8cf; font-size:10px; font-family:monospace; min-width:40px; text-align:right; }
+.btns { display:flex; gap:5px; margin-top:6px; flex-wrap:wrap; }
+.btns button { flex:1; min-width:90px; background:#2a2a44; color:#aac; border:1px solid #445; border-radius:6px; padding:5px 6px; font-size:11px; cursor:pointer; }
+.btns button:hover { background:#3a3a5a; }
+.chk { color:#fc8; font-size:11px; display:flex; align-items:center; gap:5px; cursor:pointer; margin-top:4px; }
+#log { position:absolute; bottom:14px; left:14px; right:14px; font-family:monospace; font-size:11px; background:rgba(0,0,0,.72);
+       padding:5px 9px; border-radius:6px; max-height:110px; overflow-y:auto; z-index:10; pointer-events:none; opacity:.8; color:#8df; }
+#keysHint { position:absolute; top:14px; right:14px; z-index:10; color:#8af; font:11px monospace; background:rgba(0,0,0,.6); padding:6px 10px; border-radius:8px; }
+</style>
+</head>
+<body>
+<div id="ui">
+    <!-- ЗАГРУЗКА МОДЕЛИ КАК В ПРОТОТИПАХ: file input → URL.createObjectURL → SceneLoader.ImportMeshAsync -->
+    <input type="file" id="fileInput" accept=".glb,.gltf" />
+    <div id="status">Загрузите модель (GLB/GLTF) или оставьте автозагрузку «exported-model (5).glb».</div>
+    <div id="msInfo">ожидание модели...</div>
+
+    <div class="block">
+        <span class="hdr">🎭 Master-Slave / Slave PD</span>
+        <div class="srow"><label>Kp позиции:</label><input type="range" id="kpPos" min="25" max="1600" step="25" value="800" /><span class="val" id="kpPosV">800</span></div>
+        <div class="srow"><label>ζ позиции:</label><input type="range" id="zetaPos" min="0" max="1.5" step="0.05" value="0.85" /><span class="val" id="zetaPosV">0.85</span></div>
+        <div class="srow"><label>Kp углов:</label><input type="range" id="kpAng" min="25" max="6000" step="25" value="2500" /><span class="val" id="kpAngV">2500</span></div>
+        <div class="srow"><label>maxJointTorque:</label><input type="range" id="maxTorque" min="100" max="20000" step="100" value="12000" /><span class="val" id="maxTorqueV">12000</span></div>
+        <div class="btns">
+            <button id="dieBtn">💀 Die</button>
+            <button id="aliveBtn">❤️ Come alive</button>
+            <button id="ragBtn">🛌 Ragdoll</button>
+            <button id="recBtn">🧍 Recover</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="masterVis" checked /> 👻 Показывать мастера</label>
+        <label class="chk"><input type="checkbox" id="collidersVis" checked /> 📦 Показывать коллайдеры</label>
+    </div>
+
+    <div class="block">
+        <span class="hdr">🎮 Master locomotion</span>
+        <div class="srow"><label>walkSpeed:</label><input type="range" id="walkSpeed" min="0.5" max="6" step="0.1" value="3" /><span class="val" id="walkSpeedV">3.0</span></div>
+        <div class="srow"><label>runSpeed:</label><input type="range" id="runSpeed" min="2" max="12" step="0.1" value="7" /><span class="val" id="runSpeedV">7.0</span></div>
+        <div class="srow"><label>predInfluence:</label><input type="range" id="predInf" min="0" max="1" step="0.05" value="0.85" /><span class="val" id="predInfV">0.85</span></div>
+        <div class="srow"><label>gaitSpeedK:</label><input type="range" id="gaitK" min="0" max="0.3" step="0.01" value="0.05" /><span class="val" id="gaitKV">0.05</span></div>
+    </div>
+
+    <div class="block">
+        <span class="hdr">⚙️ Features</span>
+        <label class="chk"><input type="checkbox" id="balanceToggle" checked /> ⚖️ Balance</label>
+        <label class="chk"><input type="checkbox" id="reactionsToggle" checked /> ⚡ Reactions</label>
+        <label class="chk"><input type="checkbox" id="supportGuardToggle" checked /> 🦶 Support guard</label>
+        <label class="chk"><input type="checkbox" id="dragToggle" checked /> 🖐 Пружинный захват (ЛКМ)</label>
+        <div class="srow"><label>Сила захвата K:</label><input type="range" id="dragStiff" min="50" max="1500" step="10" value="500" /><span class="val" id="dragStiffV">500</span></div>
+    </div>
+
+    <div class="block">
+        <span class="hdr">💥 Тесты</span>
+        <div class="srow"><label>Скорость шара/толчка, м/с:</label><input type="range" id="impSpeed" min="1" max="30" step="1" value="9" /><span class="val" id="impSpeedV">9</span></div>
+        <div class="btns">
+            <button id="ballBtn">🎾 Мяч</button>
+            <button id="pushBtn">💥 Толкнуть chest</button>
+            <button id="calibBtn">📐 Перекалибровать</button>
+            <button id="exportCalibBtn">💾 Экспорт калибровки</button>
+        </div>
+    </div>
+</div>
+<div id="keysHint">WASD — ход · Shift — бег · ЛКМ по коллайдеру — тянуть · Esc — отпустить</div>
+<div id="log"></div>
+<canvas id="renderCanvas"></canvas>
+
+<script type="module">
+/*__CONTROLLER_CODE__*/
+
+// =========================================================================================
+//  SCENE BOOTSTRAP — как в master-slave-prototype: правая система координат, Havok,
+//  земля + препятствия, ArcRotateCamera. Загрузка модели — через file input (GLB),
+//  с автозагрузкой 'exported-model (5).glb' рядом с файлом (как в character-controller-full.html).
+// =========================================================================================
+const $ = id => document.getElementById(id);
+const logEl = $('log'), statusEl = $('status'), msInfoEl = $('msInfo');
+function logToUI(msg, color) {
+    logEl.innerHTML += '<div style="color:' + (color || '#88ddff') + '">' + msg + '</div>';
+    logEl.scrollTop = logEl.scrollHeight;
+    while (logEl.childNodes.length > 60) logEl.removeChild(logEl.firstChild);
+    console.log(msg);
+}
+
+const canvas = $('renderCanvas');
+const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+const scene = new BABYLON.Scene(engine);
+scene.useRightHandedSystem = true;   // как в master-slave-prototype
+scene.clearColor = new BABYLON.Color4(0.08, 0.08, 0.12, 1);
+
+const camera = new BABYLON.ArcRotateCamera('cam', -Math.PI / 2, Math.PI / 2.6, 6, new BABYLON.Vector3(0, 1.1, 0), scene);
+camera.attachControl(canvas, true);
+camera.lowerRadiusLimit = 1.5; camera.upperRadiusLimit = 25;
+
+new BABYLON.HemisphericLight('l1', new BABYLON.Vector3(0, 1, 0), scene).intensity = 0.65;
+const dl = new BABYLON.DirectionalLight('l2', new BABYLON.Vector3(-1, -1.4, -1), scene);
+dl.intensity = 0.85;
+
+// Havok физика (как в прототипе)
+const havok = await HavokPhysics();
+const havokPlugin = new BABYLON.HavokPlugin(true, havok);
+scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), havokPlugin);
+
+// Земля + препятствия (readable support: ground / obstacle_*)
+const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 60, height: 60, subdivisions: 2 }, scene);
+const gm = new BABYLON.StandardMaterial('gm', scene);
+gm.diffuseColor = new BABYLON.Color3(0.16, 0.16, 0.21);
+gm.specularColor = new BABYLON.Color3(0.05, 0.05, 0.08);
+ground.material = gm;
+const staticBodies = new Set();
+{
+    const gagg = new BABYLON.PhysicsAggregate(ground, BABYLON.PhysicsShapeType.BOX, { mass: 0, restitution: 0, friction: 1.6 }, scene);
+    staticBodies.add(gagg.body);
+}
+for (let i = 0; i < 4; i++) {
+    const osz = 0.6 + i * 0.2;
+    const obs = BABYLON.MeshBuilder.CreateBox('obstacle_' + i, { size: osz }, scene);
+    obs.position.set(Math.cos(i * 2.1) * 3.2, osz / 2, Math.sin(i * 2.1) * 3.2);
+    const om = new BABYLON.StandardMaterial('om' + i, scene);
+    om.diffuseColor = new BABYLON.Color3(0.35, 0.3, 0.42);
+    obs.material = om;
+    const oagg = new BABYLON.PhysicsAggregate(obs, BABYLON.PhysicsShapeType.BOX, { mass: 0, friction: 1, restitution: 0 }, scene);
+    staticBodies.add(oagg.body);
+}
+
+// =========================================================================================
+//  CharacterController instance
+// =========================================================================================
+let cc = null;
+let currentModelName = 'model.glb';
+
+function disposeController() {
+    if (!cc) return;
+    try { cc.dispose(); } catch (e) { console.error(e); }
+    cc = null;
+    // удалить персонажные меши (кроме ground/obstacle_*)
+    scene.meshes.slice().forEach(m => {
+        if (m !== ground && !m.name.startsWith('obstacle_')) m.dispose();
+    });
+    scene.animationGroups.slice().forEach(g => { try { g.dispose(); } catch (_) {} });
+}
+
+async function attachController(result, fileName) {
+    disposeController();
+    currentModelName = fileName || 'model.glb';
+
+    const skeleton = result.skeletons && result.skeletons[0];
+    const mesh = (result.meshes || []).find(m => m.skeleton === skeleton) || (result.meshes || []).find(m => m.skeleton) || result.meshes[0];
+    if (!skeleton || !mesh) throw new Error('Нет скелета/скинет-меша в модели');
+
+    scene.stopAllAnimations();
+    mesh.computeWorldMatrix(true);
+    const bb = mesh.getBoundingInfo().boundingBox;
+    const size = bb.maximumWorld.subtract(bb.minimumWorld);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (maxDim > 10) { mesh.scaling.scaleInPlace(2.0 / maxDim); mesh.computeWorldMatrix(true); }
+    const bb2 = mesh.getBoundingInfo().boundingBox;
+    mesh.position.y -= bb2.minimumWorld.y;
+    mesh.computeWorldMatrix(true);
+
+    const animGroups = scene.animationGroups.filter(g => g.targetSkeleton === skeleton || (g.anims || []).length >= 0);
+
+    cc = new CharacterController(scene, {
+        mesh, skeleton, animationGroups: animGroups,
+    }, {
+        camera,
+        staticBodies: [...staticBodies],
+        supportPredicate: m => m.name === 'ground' || m.name.startsWith('obstacle_') || m.metadata?.tag === 'static',
+        calibration: CALIBRATION_DATA || undefined,   // встроенные профили ik_calibration_* (если есть)
+        autoCalibrate: true,                          // докалибровать недостающие клипы онлайном
+        showColliders: true,
+        masterVisible: $('masterVis').checked,
+        hooks: {
+            onImpact: (info) => logToUI('💥 impact: ' + (info && info.ref ? info.ref.name : '?'), '#ffb347'),
+            onRagdoll: () => logToUI('🛌 RAGDOLL', '#ff8a6a'),
+            onGetUp: () => logToUI('🧍 get up', '#44ff44'),
+        },
+    });
+
+    camera.target.copyFrom(mesh.position.add(new BABYLON.Vector3(0, size.y * mesh.scaling.x * 0.55, 0)));
+    camera.radius = Math.max(4, size.y * mesh.scaling.x * 1.6);
+
+    syncSlidersToCC();
+    logToUI('✅ Контроллер собран: ' + fileName + ' · клипов: ' + animGroups.length, '#44ff44');
+}
+
+// ---- загрузка модели через file input (как в master-slave-prototype) ----
+$('fileInput').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    logToUI('📂 ' + file.name, '#88ddff');
+    statusEl.textContent = 'Загрузка ' + file.name + '...';
+    try {
+        const url = URL.createObjectURL(file);
+        const result = await BABYLON.SceneLoader.ImportMeshAsync('', url, '', scene, undefined, '.glb');
+        URL.revokeObjectURL(url);
+        if (!result.skeletons.length) throw new Error('Нет скелета');
+        await attachController(result, file.name);
+        statusEl.textContent = 'Модель загружена. WASD — движение.';
+    } catch (err) {
+        statusEl.textContent = '❌ ' + err.message;
+        logToUI('❌ ' + err.message, '#ff4444');
+        console.error(err);
+    }
+});
+
+// ---- автозагрузка модели рядом с html (как в character-controller-full.html) ----
+(async function autoload() {
+    try {
+        const result = await BABYLON.SceneLoader.AppendAsync('', 'exported-model (5).glb', scene);
+        await attachController(result, 'exported-model (5).glb');
+        statusEl.textContent = 'Автозагружено exported-model (5).glb. WASD — движение.';
+    } catch (e) {
+        statusEl.textContent = 'Положите exported-model (5).glb рядом и откройте через статический сервер,\nили загрузите GLB кнопкой выше.';
+        logToUI('ℹ️ Автозагрузка glb не удалась — используйте file input.', '#ffb347');
+    }
+})();
+
+// =========================================================================================
+//  UI wiring (параметры живут в cc.params / setFeature)
+// =========================================================================================
+function bindSlider(id, valId, keyOrFn, fmt) {
+    const el = $(id), v = $(valId);
+    const apply = val => {
+        v.textContent = fmt(val);
+        if (cc) { if (typeof keyOrFn === 'function') keyOrFn(cc, val); else cc.setParam(keyOrFn, val); }
+    };
+    el.addEventListener('input', () => apply(parseFloat(el.value)));
+    apply(parseFloat(el.value));
+}
+function syncSlidersToCC() {
+    ['kpPos','zetaPos','kpAng','maxTorque','walkSpeed','runSpeed','predInf','gaitK','dragStiff','impSpeed']
+        .forEach(id => $(id).dispatchEvent(new Event('input')));
+}
+bindSlider('kpPos', 'kpPosV', 'KpPos', v => v.toFixed(0));
+bindSlider('zetaPos', 'zetaPosV', 'zetaPos', v => v.toFixed(2));
+bindSlider('kpAng', 'kpAngV', 'KpAng', v => v.toFixed(0));
+bindSlider('maxTorque', 'maxTorqueV', 'maxJointTorque', v => v.toFixed(0));
+bindSlider('walkSpeed', 'walkSpeedV', 'walkSpeed', v => v.toFixed(1));
+bindSlider('runSpeed', 'runSpeedV', 'runSpeed', v => v.toFixed(1));
+bindSlider('predInf', 'predInfV', 'predInfluence', v => v.toFixed(2));
+bindSlider('gaitK', 'gaitKV', 'gaitSpeedK', v => v.toFixed(2));
+bindSlider('dragStiff', 'dragStiffV', 'dragStiff', v => v.toFixed(0));
+let impSpeedVal = 9;
+$('impSpeed').addEventListener('input', () => { impSpeedVal = parseFloat($('impSpeed').value); $('impSpeedV').textContent = impSpeedVal.toFixed(0); });
+
+$('dieBtn').onclick = () => cc && cc.die();
+$('aliveBtn').onclick = () => cc && cc.comeAlive();
+$('ragBtn').onclick = () => cc && cc.knockdown('manual');
+$('recBtn').onclick = () => cc && cc.recover();
+$('ballBtn').onclick = () => cc && cc.throwBallAtCharacter(impSpeedVal);
+$('pushBtn').onclick = () => cc && cc.applyImpulseToBone('chest', impSpeedVal);
+$('calibBtn').onclick = () => cc && cc.startCalibrationBatch && cc.startCalibrationBatch();
+$('exportCalibBtn').onclick = () => {
+    if (!cc) return;
+    const data = { version: 2, model: currentModelName, exportedAt: new Date().toISOString(), profiles: {} };
+    for (const [name, p] of cc.masterFeet.profiles) data.profiles[name] = p;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'ik_calibration_' + currentModelName.replace(/\.glb$/i, '') + '.json'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 100);
+};
+
+$('masterVis').addEventListener('change', () => cc && cc.setFeature('masterVisible', $('masterVis').checked));
+$('collidersVis').addEventListener('change', () => {
+    if (!cc) return;
+    const on = $('collidersVis').checked;
+    for (const r of cc.colliderRefs) { try { r.mesh.visibility = on ? 0.3 : 0; } catch (_) {} }
+});
+$('balanceToggle').addEventListener('change', () => cc && cc.setFeature('balance', $('balanceToggle').checked));
+$('reactionsToggle').addEventListener('change', () => cc && cc.setFeature('reactions', $('reactionsToggle').checked));
+$('supportGuardToggle').addEventListener('change', () => cc && cc.setFeature('supportGuard', $('supportGuardToggle').checked));
+$('dragToggle').addEventListener('change', () => cc && cc.setFeature('drag', $('dragToggle').checked));
+
+// =========================================================================================
+//  HUD telemetry
+// =========================================================================================
+setInterval(() => {
+    if (!cc) { msInfoEl.textContent = 'ожидание модели...'; return; }
+    const s = cc.getState();
+    const L = (cc.masterFeet.legs.L || {}), R = (cc.masterFeet.legs.R || {});
+    msInfoEl.innerHTML =
+        'state: <b>' + s.charState + '</b> | slave: ' + s.slaveState + (s.ragdoll ? ' [RAGDOLL]' : '') +
+        '<br>followingScale=' + s.followingScale.toFixed(2) + ' strength=' + s.strength.toFixed(2) +
+        ' stagger=' + s.stagger.toFixed(2) + ' stability=' + s.stability.toFixed(2) +
+        '<br>опора стоп: ' + s.feetSupported + ' · supportY=' + (s.supportY != null ? s.supportY.toFixed(2) : '—') +
+        ' · guard: ' + (s.guardClamped ? 'CLAMPED' : '—') +
+        '<br>IK L/R: ' + ((L.ikWeight ?? 0).toFixed(2)) + '/' + ((R.ikWeight ?? 0).toFixed(2)) +
+        ' · lock ' + ((L.contact && L.contact.lock) ? 'Y' : '.') + '/' + ((R.contact && R.contact.lock) ? 'Y' : '.') +
+        ' · blend ' + ((L.blendSmooth ?? 0).toFixed(2)) + '/' + ((R.blendSmooth ?? 0).toFixed(2)) +
+        '<br>field: fwd=' + (s.valueFwd ?? 0).toFixed(2) + ' side=' + (s.valueSide ?? 0).toFixed(2) +
+        ' sprintT=' + (s.sprintT ?? 0).toFixed(2) + ' · calib=' + (s.calibrating ? '…' : s.calibratedProfiles + ' clips');
+}, 150);
+
+engine.runRenderLoop(() => scene.render());
+window.addEventListener('resize', () => engine.resize());
+logToUI('🟢 Загрузите модель. Опора читается коллизиями + рейкастами из стоп.', '#44ff44');
+</script>
+</body>
+</html>
