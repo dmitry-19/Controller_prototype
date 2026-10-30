@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>CharacterController (Master-Slave) — демо</title>
+    <style>
+        body, html { margin:0; padding:0; width:100%; height:100%; overflow:hidden; font-family:'Segoe UI',sans-serif; background:#141420; }
+        #renderCanvas { width:100%; height:100%; display:block; touch-action:none; }
+        #panel { position:absolute; top:12px; left:12px; background:rgba(0,0,0,.75); color:#ddd; padding:14px; border-radius:8px; font-size:12px; max-width:320px; z-index:10; }
+        #panel h3 { margin:0 0 8px; color:#6f6; font-size:14px; }
+        #status { color:#fc8; min-height:32px; white-space:pre-line; }
+        .row { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+        button { background:#345; color:#fff; border:0; border-radius:4px; padding:6px 10px; cursor:pointer; }
+        button:hover { background:#467; }
+        input[type=range] { width:130px; }
+        label { display:flex; justify-content:space-between; gap:6px; align-items:center; }
+        #hint { position:absolute; bottom:10px; left:50%; transform:translateX(-50%); color:#8aa; font-size:12px; background:rgba(0,0,0,.5); padding:6px 14px; border-radius:16px; }
+    </style>
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/havok/HavokPhysics_umd.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+</head>
+<body>
+<div id="panel">
+    <h3>🧠 CharacterController Demo</h3>
+    <div class="row"><input type="file" id="file-input" accept=".glb,.gltf"/></div>
+    <div id="status">Загрузите GLB-модель персонажа со скелетом.</div>
+    <div class="row">
+        <button id="btn-ball">🎾 Мяч</button>
+        <button id="btn-push">💥 Толкнуть</button>
+        <button id="btn-ragdoll">🛌 Ragdoll</button>
+        <button id="btn-recover">🧍 Recover</button>
+        <button id="btn-guard" class="tog">SupportGuard: ON</button>
+    </div>
+    <label>walkSpeed <input type="range" id="walkSpeed" min="0.5" max="6" step="0.1" value="3"/></label>
+    <label>Kp следования <input type="range" id="KpPos" min="100" max="3000" step="50" value="800"/></label>
+    <label>Сила захвата <input type="range" id="dragStiff" min="50" max="1500" step="10" value="500"/></label>
+</div>
+<div id="hint">WASD — ход · Shift — бег · ЛКМ по коллайдеру — тянуть · Esc — отпустить</div>
+<canvas id="renderCanvas"></canvas>
+
+<script type="module">
+import { CharacterController } from './characterController.js';
+import { loadModelOnce, centerAndScale } from './utils.js';
+
+const canvas = document.getElementById('renderCanvas');
+const statusEl = document.getElementById('status');
+const engine = new BABYLON.Engine(canvas, true, { stencil: true });
+const scene = new BABYLON.Scene(engine);
+scene.clearColor = new BABYLON.Color4(0.08, 0.08, 0.12, 1);
+
+const camera = new BABYLON.ArcRotateCamera('cam', -Math.PI / 2, Math.PI / 2.6, 6, new BABYLON.Vector3(0, 1.1, 0), scene);
+camera.attachControl(canvas, true);
+camera.lowerRadiusLimit = 1.5; camera.upperRadiusLimit = 25;
+
+new BABYLON.HemisphericLight('l1', new BABYLON.Vector3(0, 1, 0), scene).intensity = 0.65;
+const dl = new BABYLON.DirectionalLight('l2', new BABYLON.Vector3(-1, -1.4, -1), scene);
+dl.intensity = 0.85;
+
+// физика
+const havok = await HavokPhysics();
+const plugin = new BABYLON.HavokPlugin(true, havok);
+scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), plugin);
+
+// окружение: земля + препятствия-ступеньки
+const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 40, height: 40 }, scene);
+new BABYLON.PhysicsAggregate(ground, BABYLON.PhysicsShapeType.BOX, { mass: 0, friction: 1.6 }, scene);
+for (let i = 0; i < 3; i++) {
+    const s = 0.5 + i * 0.2;
+    const box = BABYLON.MeshBuilder.CreateBox('obstacle_' + i, { size: s }, scene);
+    box.position.set(Math.cos(i * 2.1) * 3.2, s / 2, Math.sin(i * 2.1) * 3.2);
+    new BABYLON.PhysicsAggregate(box, BABYLON.PhysicsShapeType.BOX, { mass: 0, friction: 1 }, scene);
+}
+
+let cc = null;
+
+document.getElementById('file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    statusEl.textContent = '⏳ Загрузка ' + file.name + '...';
+    if (cc) { cc.dispose(); cc = null; }
+    try {
+        const model = await loadModelOnce(file, scene);
+        // Масштабируем к росту 1.8 м
+        const root = new BABYLON.TransformNode('charRoot', scene);
+        model.mesh.setParent(root);
+        centerAndScale(root, 1.8);
+        model.mesh.parent = null;
+        root.dispose();
+
+        cc = new CharacterController(scene, model, {
+            camera,
+            supportPredicate: m => m.name === 'ground' || m.name.startsWith('obstacle_'),
+            hooks: {
+                onImpact: (info) => console.log('[hit]', info.zone, info.severity.toFixed(2)),
+                onRagdoll: () => console.log('→ RAGDOLL'),
+                onGetUp: () => console.log('→ GET UP'),
+            },
+        });
+        statusEl.textContent = '✅ Контроллер собран. Состояние появится ниже.';
+    } catch (err) {
+        console.error(err);
+        statusEl.textContent = '❌ Ошибка: ' + err.message;
+    }
+});
+
+// кнопки/слайдеры
+document.getElementById('btn-ball').onclick = () => cc?.throwBallAtCharacter(9);
+document.getElementById('btn-push').onclick = () => cc?.applyImpulseToBone('chest', 8);
+document.getElementById('btn-ragdoll').onclick = () => cc?.knockdown('manual');
+document.getElementById('btn-recover').onclick = () => cc?.recover();
+let guardOn = true;
+document.getElementById('btn-guard').onclick = (e) => {
+    guardOn = !guardOn; cc?.setFeature('supportGuard', guardOn);
+    e.target.textContent = 'SupportGuard: ' + (guardOn ? 'ON' : 'OFF');
+};
+document.getElementById('walkSpeed').oninput = (e) => cc?.setParam('walkSpeed', parseFloat(e.target.value));
+document.getElementById('KpPos').oninput = (e) => cc?.setParam('KpPos', parseFloat(e.target.value));
+document.getElementById('dragStiff').oninput = (e) => cc?.setParam('dragStiff', parseFloat(e.target.value));
+
+engine.runRenderLoop(() => {
+    scene.render();
+    if (cc && engine.frame % 15 === 0) {
+        const s = cc.getState();
+        statusEl.textContent =
+            `мастер: ${s.charState} | слейв: ${s.slaveState}${s.ragdoll ? ' [RAGDOLL]' : ''}\n` +
+            `stability ${(s.stability * 100) | 0}% · following ${(s.followingScale * 100) | 0}% · strength ${(s.strength * 100) | 0}%\n` +
+            `опора ног: ${s.feetSupported} · err ${(s.followErrPos / 100).toFixed(2)}м${s.guardClamped ? ' · 🚧GUARD' : ''}`;
+    }
+});
+window.addEventListener('resize', () => engine.resize());
+</script>
+</body>
+</html>
