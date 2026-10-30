@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ГИБРИДНЫЙ RAGDOLL + ДВА КИНЕМАТИЧЕСКИХ СКЕЛЕТА + ФЕХТОВАНИЕ</title>
+    <style>
+        body, html { margin:0; padding:0; width:100%; height:100%; overflow:hidden; font-family:'Segoe UI',sans-serif; }
+        #canvas { width:100%; height:100%; display:block; }
+        #controls {
+            position:absolute; top:20px; left:20px; background:rgba(0,0,0,0.8); color:white; padding:20px;
+            border-radius:8px; backdrop-filter:blur(5px); z-index:100; border-left:5px solid #4CAF50;
+            transition: opacity 0.3s;
+        }
+        #controls.hidden { opacity:0; pointer-events:none; }
+        #file-input, #reset-btn, #skeleton-toggle, #marker-toggle, #hide-ui-btn, #spawn-enemy-btn {
+            pointer-events:auto; background:#4CAF50; color:white; border:none; padding:8px 16px;
+            border-radius:4px; cursor:pointer; font-size:14px; margin-top:10px; margin-right:8px;
+            transition:0.2s;
+        }
+        #spawn-enemy-btn { background:#9b59b6; }
+        #spawn-enemy-btn:disabled { background:#555; cursor:not-allowed; }
+        #hide-ui-btn { background:#666; }
+        #status { margin-top:12px; font-size:14px; color:#ddd; }
+        .control-note {
+            position:absolute; bottom:20px; left:20px; background:rgba(0,0,0,0.6); color:#0f0; padding:8px 15px;
+            border-radius:20px; font-size:14px; backdrop-filter:blur(4px); border:1px solid #4CAF50;
+            z-index:200;
+        }
+        .key-hint { color:#ffaa00; font-weight:bold; }
+        .idle-indicator { color:#88ff88; margin-top:8px; font-size:13px; }
+        #enemy-status { color:#ffaa00; margin-left:10px; }
+
+        #test-panel {
+            position:absolute; bottom:20px; right:20px; background:rgba(0,0,0,0.8); color:white;
+            padding:15px; border-radius:8px; backdrop-filter:blur(5px); border-left:5px solid #ffaa00;
+            z-index:300; text-align:center;
+        }
+        #test-impulse-btn {
+            background:#ffaa00; color:#000; border:none; padding:10px 20px;
+            border-radius:4px; cursor:pointer; font-size:16px; font-weight:bold;
+            transition:0.2s; margin-top:5px;
+        }
+        #test-impulse-btn:hover { background:#ffc34d; }
+        #test-force { font-size:14px; color:#ffaa00; margin-top:5px; }
+        #stand-up-btn, #ragdoll-btn {
+            background:#4CAF50; color:white; border:none; padding:8px 16px;
+            border-radius:4px; cursor:pointer; font-size:14px; margin-top:8px; margin-right:4px;
+        }
+        #ragdoll-btn { background:#ff5555; }
+        .slider-group { display:flex; align-items:center; gap:8px; margin:5px 0; }
+        .slider-group label { width:120px; }
+        input[type="range"] { flex:1; }
+
+        .stamina-container {
+            margin-top:10px;
+            text-align:left;
+        }
+        .stamina-bar-bg {
+            background:#333;
+            height:10px;
+            border-radius:5px;
+            margin-top:5px;
+        }
+        .stamina-bar-fill {
+            background:#4CAF50;
+            width:100%;
+            height:10px;
+            border-radius:5px;
+        }
+        .stamina-text {
+            font-size:12px;
+            margin-top:3px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="control-note" id="hint-area">
+        🟢 Зелёные сферы – верхний скелет | 🔵 Синие сферы – нижний скелет<br>
+        <span class="key-hint">WASD</span> – движение | <span class="key-hint">Shift</span> – бег | <span class="key-hint">Ctrl</span> – приседание<br>
+        <span class="key-hint">1-9</span> – действия | <span class="key-hint">I</span> – след. idle | <span class="key-hint">F</span> – режим фехтования | <span class="key-hint">R</span> – ragdoll | <span class="key-hint">H</span> – скрыть UI
+    </div>
+    <div id="controls">
+        <h2>🦴 ГИБРИДНЫЙ RAGDOLL + ДВА КИНЕМАТИЧЕСКИХ СКЕЛЕТА + ФЕХТОВАНИЕ</h2>
+        <p style="color:#aaffaa;">✅ Капсула-коллайдер | ✅ Скольжение вдоль стен | ✅ Отталкивание + защита</p>
+        <input type="file" id="file-input" accept=".glb,.gltf">
+        <div>
+            <button id="reset-btn" disabled>🔄 Сброс</button>
+            <button id="skeleton-toggle" disabled>👁️ Скелет (динамика)</button>
+            <button id="marker-toggle" disabled>🔘 Скрыть маркеры</button>
+            <button id="hide-ui-btn">🙈 Скрыть UI</button>
+            <button id="spawn-enemy-btn" disabled>👻 Spawn Enemy</button>
+            <span id="enemy-status">Нет врага</span>
+        </div>
+        <div id="status">📂 Выберите GLB/GLTF со скелетом и анимациями</div>
+        <div id="idle-status" class="idle-indicator"></div>
+    </div>
+
+    <div id="test-panel">
+        <div>💥 Тестовый импульс</div>
+        <button id="test-impulse-btn">🔨 Случайная сила</button>
+        <div id="test-force">Сила: —</div>
+        <button id="stand-up-btn">🆙 Встать (если упал)</button>
+        <button id="ragdoll-btn">💤 Полный Ragdoll</button>
+        <hr style="border-color:#555; margin:10px 0;">
+        <div style="text-align:left;">
+            <div class="slider-group">
+                <label>Swing Duration:</label>
+                <input type="range" id="swing-duration" min="0.1" max="1.5" step="0.1" value="0.5">
+                <span id="swing-dur-val" style="min-width:40px;">0.5</span>s
+            </div>
+            <div class="slider-group">
+                <label>Swing Cooldown:</label>
+                <input type="range" id="swing-cooldown" min="0.0" max="1.0" step="0.05" value="0.3">
+                <span id="swing-cool-val" style="min-width:40px;">0.3</span>s
+            </div>
+            <div class="slider-group">
+                <label>Swing Threshold:</label>
+                <input type="range" id="swing-threshold" min="5" max="30" step="1" value="13">
+                <span id="swing-thresh-val" style="min-width:40px;">13</span>
+            </div>
+        </div>
+        <div class="slider-group">
+            <label>Low speed threshold:</label>
+            <input type="range" id="low-speed-threshold" min="1.0" max="8.0" step="0.5" value="4.5">
+            <span id="low-speed-val">4.5</span> m/s
+        </div>
+        <div class="slider-group">
+            <label>Medium speed threshold:</label>
+            <input type="range" id="medium-speed-threshold" min="5.0" max="15.0" step="0.5" value="10.0">
+            <span id="medium-speed-val">10.0</span> m/s
+        </div>
+        <div class="stamina-container">
+            <div>💪 Выносливость</div>
+            <div class="stamina-bar-bg">
+                <div id="stamina-bar" class="stamina-bar-fill"></div>
+            </div>
+            <div id="stamina-text" class="stamina-text">100/100</div>
+        </div>
+    </div>
+
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+    <script src="https://cdn.babylonjs.com/havok/HavokPhysics_umd.js"></script>
+
+    <script type="module" src="js/utils.js"></script>
+    <script type="module" src="js/movement.js"></script>
+    <script type="module" src="js/animationManager.js"></script>
+    <script type="module" src="js/stateMachine.js"></script>
+    <script type="module" src="js/ragdollPhysics.js"></script>
+    <script type="module" src="js/weapon-system.js"></script>
+    <script type="module" src="js/staminaSystem.js"></script>
+    <script type="module" src="js/collisionResponse.js"></script>
+    <script type="module" src="js/ikSystem.js"></script>
+    <script type="module" src="js/dynamicInteraction.js"></script>
+    <script type="module" src="js/fogEnemy.js"></script>
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>

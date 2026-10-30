@@ -1,0 +1,1554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>IK test — predictive landing XZ · stable</title>
+<style>
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#08080e;color:#d0d0d0;font-family:-apple-system,"Segoe UI",Roboto,system-ui,sans-serif}
+  #canvas{position:absolute;inset:0;width:100%;height:100%;display:block;outline:none;touch-action:none}
+  #drop{position:absolute;top:14px;left:14px;background:rgba(0,0,0,.82);padding:10px 14px;border-radius:8px;border:1px dashed rgba(255,255,255,.28);cursor:pointer;font-size:12px;color:#aaa;z-index:10;min-width:220px}
+  #drop.drag{border-color:#4caf50;background:rgba(76,175,80,.14)}
+  #drop b{color:#4caf50}
+  #drop input{display:none}
+  #hud{position:absolute;top:14px;right:14px;background:rgba(0,0,0,.9);padding:12px 16px;border-radius:8px;font-family:ui-monospace,monospace;font-size:11px;color:#8cf;z-index:10;line-height:1.55;min-width:580px;max-width:700px}
+  #hud h3{margin:0 0 8px;color:#4caf50;font-size:12px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #333;padding-bottom:6px}
+  #hud .row{display:flex;justify-content:space-between;gap:12px}
+  #hud .row span:first-child{color:#889}
+  #hud .row b{color:#8cf;font-weight:500}
+  #hud b.ok{color:#4caf50}
+  #hud b.err{color:#ff6b6b}
+  #hud b.warn{color:#ffb347}
+  #hud b.on{color:#00e5ff}
+  #hud b.off{color:#555}
+  #hud b.cmt{color:#ffd54f}
+  #hud .sec{margin-top:10px;color:#666;font-size:10px;text-transform:uppercase;letter-spacing:.4px}
+  #errbar{position:absolute;left:0;right:0;bottom:0;background:#3a1515;color:#ff8080;font-family:ui-monospace,monospace;font-size:11px;padding:4px 10px;display:none;z-index:99}
+  #anims{position:absolute;bottom:26px;left:14px;background:rgba(0,0,0,.82);padding:8px 12px;border-radius:8px;font-family:ui-monospace,monospace;font-size:11px;color:#aaa;z-index:10;line-height:1.7;max-width:calc(100vw - 660px)}
+  #anims button{background:#2a2a44;color:#ccf;border:1px solid #445;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:ui-monospace,monospace;font-size:10px;margin:2px}
+  #anims button:hover{background:#3a3a55}
+  #anims button.on{background:#3498db;color:#fff;border-color:#3498db}
+  #anims button.calibrated::after{content:" ✓";color:#4caf50}
+  #anims button.extra{background:#2a1f3a;color:#d8b8ff;border-color:#4a3f5f}
+  #anims button.extra:hover{background:#3a2f4a}
+  #anims .calib-btns{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  #anims .calib-btns button{background:#1a3a3f;color:#8ce;border-color:#2a5a5f}
+  #anims .calib-btns button:hover{background:#2a5a5f}
+  #anims .calib-btns button.primary{background:#154f5a;color:#fff;border-color:#267c8a}
+  #anims .calib-btns button.primary:hover{background:#267c8a}
+  #anims .calib-btns button.toggle{background:#2a2a44;color:#ccf;border-color:#667}
+  #anims .calib-btns button.toggle.on{background:#0078d4;color:#fff;border-color:#0078d4}
+  #anims label.auto-cal{color:#8ce;font-size:10px;display:flex;align-items:center;gap:4px;cursor:pointer;margin-left:6px}
+  #anims label.auto-cal input{accent-color:#26c6da}
+  #uiToggle{position:fixed;bottom:14px;right:14px;z-index:100;background:rgba(0,0,0,.55);color:#8cf;border:1px solid rgba(52,152,219,.3);padding:6px 14px;border-radius:6px;font-family:ui-monospace,monospace;font-size:11px;cursor:pointer;opacity:.55;transition:opacity .15s}
+  #uiToggle:hover{opacity:1}
+  #calibBanner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.82);padding:22px 44px;border-radius:14px;font-family:ui-monospace,monospace;color:#4caf50;display:none;z-index:50;text-align:center;border:1px solid rgba(76,175,80,.4);min-width:320px;pointer-events:none}
+  #calibBanner .title{font-size:22px;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px}
+  #calibBanner .anim{font-size:14px;color:#8cf;margin-bottom:10px}
+  #calibBanner .bar{height:6px;background:#1a1a1a;border-radius:3px;overflow:hidden;margin-top:8px}
+  #calibBanner .bar div{height:100%;background:#4caf50;transition:width .2s;width:0%}
+  #calibBanner .count{font-size:12px;color:#aaa;margin-top:6px}
+  body.ui-hidden #drop,
+  body.ui-hidden #hud,
+  body.ui-hidden #anims,
+  body.ui-hidden #errbar{display:none !important}
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="drop">
+  <div><b>Drop character .glb</b></div>
+  <div style="margin-top:4px;font-size:11px;color:#666" id="dstatus">or click to pick</div>
+  <input type="file" id="file" accept=".glb" />
+</div>
+<div id="calibBanner">
+  <div class="title">Calibrating</div>
+  <div class="anim" id="calibAnim">—</div>
+  <div class="bar"><div id="calibBarFill"></div></div>
+  <div class="count" id="calibCount">0 / 0</div>
+</div>
+<div id="hud">
+  <h3>IK test · predictive landing XZ · stable</h3>
+  <div class="row"><span>frames</span><b id="d_fr">0</b></div>
+  <div class="row"><span>anim</span><b id="d_an">—</b></div>
+  <div class="row"><span>profile</span><b id="d_pr">—</b></div>
+  <div class="row"><span>pelvis</span><b id="d_pb">—</b></div>
+  <div class="row"><span>chain L</span><b id="d_ll">—</b></div>
+  <div class="row"><span>chain R</span><b id="d_lr">—</b></div>
+  <div class="row"><span>ball bones</span><b id="d_bb">—</b></div>
+  <div class="sec">Calibration</div>
+  <div class="row"><span>status</span><b id="d_cst">—</b></div>
+  <div class="row"><span>cached / calibratable</span><b id="d_pc">0 / 0</b></div>
+  <div class="row"><span>rest offset L/R</span><b id="d_rg">—</b></div>
+  <div class="row"><span>ball offset L/R</span><b id="d_rb">—</b></div>
+  <div class="sec">Predictive landing</div>
+  <div class="row"><span>PRED</span><b id="d_pred">ON</b></div>
+  <div class="row"><span>anim ankle XZ L / R</span><b id="d_animxz">—</b></div>
+  <div class="row"><span>landing L</span><b id="d_landL">—</b></div>
+  <div class="row"><span>landing R</span><b id="d_landR">—</b></div>
+  <div class="row"><span>ik ΔXZ L / R</span><b id="d_ikxz">—</b></div>
+  <div class="sec">Foot</div>
+  <div class="row"><span>heel Y L / R</span><b id="d_heel">—</b></div>
+  <div class="row"><span>toe penetr L / R</span><b id="d_toe">—</b></div>
+  <div class="row"><span>foot pitch L / R</span><b id="d_fp">—</b></div>
+  <div class="sec">Per-leg (blend · β)</div>
+  <div class="row"><span>L</span><b id="d_hl">—</b></div>
+  <div class="row"><span>R</span><b id="d_hr">—</b></div>
+  <div class="sec">Pelvis</div>
+  <div class="row"><span>target / smooth</span><b id="d_dy">—</b></div>
+  <div class="row"><span>worldY before→after</span><b id="d_p1">—</b></div>
+  <div class="sec">Gait</div>
+  <div class="row"><span>phase · pulse</span><b id="d_gp">—</b></div>
+  <div class="row"><span>root vel</span><b id="d_rv">—</b></div>
+</div>
+<div id="anims">
+  <div style="color:#666;margin-bottom:4px;font-size:10px;text-transform:uppercase">idle + locomotion + push · <span style="color:#d8b8ff">extra</span></div>
+  <div id="animBtns"></div>
+  <div class="calib-btns">
+    <button id="btnBatchCalib" class="primary">⚙ Calibrate all</button>
+    <button id="btnPredToggle" class="toggle on">Predictive: ON</button>
+    <button id="btnExportCalib">⬇ Export</button>
+    <button id="btnImportCalib">⬆ Import</button>
+    <input type="file" id="calibFile" accept=".json" style="display:none" />
+    <label class="auto-cal"><input type="checkbox" id="autoCalOnLoad" checked /> Auto-cal</label>
+  </div>
+  <div style="color:#666;margin-top:6px;font-size:10px">SPACE pause · R reset · P pred · <b style="color:#8cf">H hide</b></div>
+</div>
+<div id="errbar"></div>
+<button id="uiToggle">Hide UI</button>
+
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+<script>
+(function(){
+"use strict";
+
+/* ===== UI ===== */
+const uiToggle=document.getElementById("uiToggle");
+function toggleUI(){document.body.classList.toggle("ui-hidden");uiToggle.textContent=document.body.classList.contains("ui-hidden")?"Show UI":"Hide UI";}
+uiToggle.addEventListener("click",toggleUI);
+const autoCalCheckbox=document.getElementById("autoCalOnLoad");
+const calibBanner=document.getElementById("calibBanner");
+const calibAnimEl=document.getElementById("calibAnim");
+const calibBarFill=document.getElementById("calibBarFill");
+const calibCountEl=document.getElementById("calibCount");
+function showCalibBanner(animName,idx,total,frac){
+  calibBanner.style.display="block";
+  if(animName) calibAnimEl.textContent=animName;
+  if(total!=null){
+    calibCountEl.textContent=`${Math.min(idx+1,total)} / ${total}`;
+    const pct=total>0?Math.max(0,Math.min(1,frac))*100:0;
+    calibBarFill.style.width=pct.toFixed(1)+"%";
+  }
+}
+function hideCalibBanner(){calibBanner.style.display="none";}
+
+const errbar=document.getElementById("errbar");
+function showErr(msg){if(errbar){errbar.textContent="⚠ "+msg;errbar.style.display="block";}}
+function nf(v,d){return (typeof v==="number"&&isFinite(v))?v.toFixed(d==null?2:d):"?";}
+function ensureNum(x,fb){return (typeof x==="number"&&isFinite(x))?x:(fb==null?0:fb);}
+
+/* ===== Math ===== */
+const clamp=(x,lo,hi)=>x>hi?hi:x<lo?lo:x;
+const degToRad=(d)=>d*Math.PI/180;
+const radToDeg=(r)=>r*180/Math.PI;
+const dampFactor=(dt,t)=>1-Math.exp(-dt/Math.max(0.001,t));
+function safeNormalize(v,fb){const l=v.length();return l>1e-8?v.scale(1/l):(fb||new BABYLON.Vector3(1,0,0)).clone();}
+function angleBetween(a,b){const d=clamp(BABYLON.Vector3.Dot(safeNormalize(a),safeNormalize(b)),-1,1);return Math.acos(d);}
+function rotateVectorByQuat(v,q){
+  const qx=q.x,qy=q.y,qz=q.z,qw=q.w;
+  const ix= qw*v.x+qy*v.z-qz*v.y;
+  const iy= qw*v.y+qz*v.x-qx*v.z;
+  const iz= qw*v.z+qx*v.y-qy*v.x;
+  const iw=-qx*v.x-qy*v.y-qz*v.z;
+  return new BABYLON.Vector3(ix*qw+iw*-qx+iy*-qz-iz*-qy,iy*qw+iw*-qy+iz*-qx-ix*-qz,iz*qw+iw*-qz+ix*-qy-iy*-qx);
+}
+function quatFromAxisAngle(axis,angle,out){
+  out=out||new BABYLON.Quaternion();
+  const a=safeNormalize(axis,new BABYLON.Vector3(1,0,0));
+  const h=angle*0.5,s=Math.sin(h);
+  out.x=a.x*s;out.y=a.y*s;out.z=a.z*s;out.w=Math.cos(h);
+  out.normalize();return out;
+}
+function quatFromTo(from,to,out){
+  out=out||new BABYLON.Quaternion();
+  const f=safeNormalize(from),t=safeNormalize(to);
+  const d=clamp(BABYLON.Vector3.Dot(f,t),-1,1);
+  if(d>0.999999){out.copyFrom(BABYLON.Quaternion.Identity());return out;}
+  if(d<-0.999999){
+    let ax=BABYLON.Vector3.Cross(BABYLON.Vector3.Up(),f);
+    if(ax.lengthSquared()<1e-6) ax=BABYLON.Vector3.Cross(BABYLON.Vector3.Right(),f);
+    quatFromAxisAngle(ax,Math.PI,out);return out;
+  }
+  quatFromAxisAngle(BABYLON.Vector3.Cross(f,t),Math.acos(d),out);return out;
+}
+function worldQuatOf(node){const q=new BABYLON.Quaternion();node.getWorldMatrix().decompose(undefined,q,undefined);return q;}
+
+/* ===== Limits ===== */
+const JOINT_LIMITS={
+  clavicle:{type:'ball',swing:35},upperarm:{type:'ball',swing:175},
+  lowerarm:{type:'hinge',flexMin:0,flexMax:150},hand:{type:'ball',swing:60},
+  thigh:{type:'ball',swing:120},calf:{type:'hinge',flexMin:0,flexMax:145},
+  foot:{type:'ball',swing:60},spine:{type:'ball',swing:18},neck:{type:'ball',swing:40}
+};
+const THIGH_FWD_DEG=120,THIGH_BWD_DEG=35,THIGH_SIDE_DEG=50;
+const CALF_STRAIGHTEN_DEG=30;
+const MAX_FOOT_TILT_DEG=55;
+const MIN_ANKLE_OFFSET=0.01;
+const MAX_ANKLE_OFFSET=0.40;
+
+/* ===== Predictive ===== */
+const PRED_RADIUS=0.22;
+const PRED_MAX_OFFSET=0.30;
+const PRED_INFLUENCE=0.85;
+const PRED_INFLUENCE_AT_PLANT=1.0;
+const PRED_LOCK_BLEND=0.85;
+const PRED_LOCK_EXIT=0.55;
+const PRED_COMMIT_BLEND=0.70;
+const PRED_HYSTERESIS=0.06;
+const PRED_RAISE_THRESHOLD=0.04;
+const PRED_SMOOTH_TAU_XZ=0.10;
+const PRED_SMOOTH_TAU_Y=0.18;
+
+const FOOT_PROBE_ITERS=3;
+
+const GAIT_SPEED_K=0.20;
+const PULSE_ENABLED_MODES=new Set(['walk','run','sprint','crouch','strafe','injured']);
+
+function getJointLimits(name){
+  const n=String(name||"").toLowerCase();
+  if(n.includes("clavicle")||n.includes("shoulder")) return JOINT_LIMITS.clavicle;
+  if(n.includes("forearm")||n.includes("lowerarm")) return JOINT_LIMITS.lowerarm;
+  if((n.includes("upperarm")||n.includes("arm"))&&!n.includes("fore")&&!n.includes("lower")) return JOINT_LIMITS.upperarm;
+  if(n.includes("hand")) return JOINT_LIMITS.hand;
+  if(n.includes("thigh")||n.includes("upleg")) return JOINT_LIMITS.thigh;
+  if(n.includes("calf")||n.includes("shin")||n.includes("lowerleg")) return JOINT_LIMITS.calf;
+  if(n.includes("foot")||n.includes("ball")||n.includes("toe")) return JOINT_LIMITS.foot;
+  if(n.includes("neck")||n.includes("head")) return JOINT_LIMITS.neck;
+  if(n.includes("spine")||n.includes("pelvis")||n.includes("hips")||n.includes("chest")) return JOINT_LIMITS.spine;
+  return {type:'ball',swing:175};
+}
+function isThighName(name){const n=String(name||"").toLowerCase();return n.includes("thigh")||n.includes("upleg");}
+function charForward(){return new BABYLON.Vector3(Math.sin(S.yaw),0,Math.cos(S.yaw));}
+
+function clampDirToCone(restDir,dir,maxAng){
+  const r=safeNormalize(restDir),d=safeNormalize(dir);
+  const ang=angleBetween(r,d);
+  if(ang<=maxAng) return d;
+  const axis=BABYLON.Vector3.Cross(r,d);
+  if(axis.lengthSquared()<1e-10) return r.clone();
+  axis.normalize();
+  return rotateVectorByQuat(r,quatFromAxisAngle(axis,maxAng,new BABYLON.Quaternion()));
+}
+function clampThighDir(st,i,dir){
+  const rest=safeNormalize(st.restWorldDir[i]);
+  const d=safeNormalize(dir);
+  const theta=angleBetween(rest,d);
+  if(theta<1e-6) return d;
+  const c=Math.cos(theta);
+  let perp=d.subtract(rest.scale(c));
+  let axis,lim;
+  const fwd=charForward();
+  if(perp.lengthSquared()<1e-10){
+    axis=BABYLON.Vector3.Cross(rest,fwd);
+    if(axis.lengthSquared()<1e-10) axis=new BABYLON.Vector3(1,0,0);
+    axis.normalize();
+    lim=degToRad(THIGH_FWD_DEG);
+  } else {
+    perp.normalize();
+    const f=clamp(BABYLON.Vector3.Dot(perp,fwd),-1,1);
+    const sideLim=degToRad(THIGH_SIDE_DEG);
+    lim=(f>=0)?sideLim+(degToRad(THIGH_FWD_DEG)-sideLim)*f:sideLim+(degToRad(THIGH_BWD_DEG)-sideLim)*(-f);
+    axis=safeNormalize(BABYLON.Vector3.Cross(rest,d));
+  }
+  if(theta<=lim) return d;
+  return rotateVectorByQuat(rest,quatFromAxisAngle(axis,lim,new BABYLON.Quaternion()));
+}
+function clampBaseDir(st,i,dir){
+  if(isThighName(st.names[i])) return clampThighDir(st,i,dir);
+  const lim=getJointLimits(st.names[i]);
+  return clampDirToCone(st.restWorldDir[i],dir,degToRad(lim.swing||175));
+}
+function clampBendWithParent(st,i,dirDesired){
+  const nodes=st.nodes;
+  const p=safeNormalize(nodes[i].getAbsolutePosition().subtract(nodes[i-1].getAbsolutePosition()));
+  const d=safeNormalize(dirDesired);
+  const beta0=angleBetween(st.restWorldDir[i-1],st.restWorldDir[i]);
+  const lim=getJointLimits(st.names[i]);
+  const bMin=Math.max(0.02,beta0-degToRad(CALF_STRAIGHTEN_DEG));
+  const bMax=Math.min(Math.PI-0.02,beta0+degToRad(lim.flexMax||150));
+  const beta=angleBetween(p,d);
+  if(beta>=bMin&&beta<=bMax) return d;
+  const betaC=clamp(beta,bMin,bMax);
+  let perp=d.subtract(p.scale(BABYLON.Vector3.Dot(d,p)));
+  if(perp.lengthSquared()<1e-10){
+    const helper=Math.abs(p.y)<0.9?new BABYLON.Vector3(0,1,0):new BABYLON.Vector3(1,0,0);
+    perp=BABYLON.Vector3.Cross(p,helper).normalize();
+  } else perp.normalize();
+  return p.scale(Math.cos(betaC)).add(perp.scale(Math.sin(betaC))).normalize();
+}
+function setBoneDirWorld(st,i,dirWorld){
+  const node=st.nodes[i];
+  const lim=getJointLimits(st.names[i]);
+  let dir=safeNormalize(dirWorld);
+  let appliedDeg;
+  if(lim.type==='hinge'&&i>0){
+    dir=clampBendWithParent(st,i,dir);
+    const p=safeNormalize(st.nodes[i].getAbsolutePosition().subtract(st.nodes[i-1].getAbsolutePosition()));
+    appliedDeg=radToDeg(angleBetween(p,dir));
+  } else if(i===st.cfg.baseIndex){
+    dir=clampBaseDir(st,i,dir);
+    appliedDeg=radToDeg(angleBetween(st.restWorldDir[i],dir));
+  } else {
+    dir=clampDirToCone(st.restWorldDir[i],dir,degToRad(lim.swing||175));
+    appliedDeg=radToDeg(angleBetween(st.restWorldDir[i],dir));
+  }
+  const deltaWorld=quatFromTo(st.restWorldDir[i],dir,new BABYLON.Quaternion());
+  const desiredWorldQ=deltaWorld.multiply(st.restWorldQuats[i]);
+  const parentWQ=node.parent?worldQuatOf(node.parent):BABYLON.Quaternion.Identity();
+  node.rotationQuaternion=parentWQ.conjugate().multiply(desiredWorldQ);
+  node.computeWorldMatrix(true);
+  return {swingDeg:appliedDeg};
+}
+function sumLen(arr,from,to){let s=0;for(let i=from;i<=to;i++)s+=arr[i];return s;}
+
+function solveHingeFromEnd(st,cfg,ikTarget,reportOut){
+  const baseIdx=cfg.baseIndex,h=cfg.hinge;
+  const eff=st.eff;
+  const isLeg=cfg.id.startsWith('leg');
+  for(let pass=0;pass<2;pass++){
+    const endTarget=ikTarget.clone();
+    const basePos=st.nodes[baseIdx].getAbsolutePosition();
+    const La=st._seg?st._seg.La:sumLen(st.lengths,baseIdx,h-1);
+    const Lb=st._seg?st._seg.Lb:sumLen(st.lengths,h,st.eff-1);
+    let v=endTarget.subtract(basePos);
+    let d=v.length();
+    const dir=d>1e-6?v.scale(1/d):st.restWorldDir[baseIdx].clone();
+    const dMax=(La+Lb)*0.98;
+    const dMin=Math.abs(La-Lb)+1e-4;
+    d=clamp(d,dMin,dMax);
+    const endPos=basePos.add(dir.scale(d));
+    const aa=(La*La-Lb*Lb+d*d)/(2*d);
+    const hh=Math.sqrt(Math.max(0,La*La-aa*aa));
+    const mid=basePos.add(dir.scale(aa));
+    let pole;
+    if(isLeg){
+      const fwd=charForward();
+      const fwdPerp=fwd.subtract(dir.scale(BABYLON.Vector3.Dot(fwd,dir)));
+      let restPole=st.restWorldPos[h].subtract(basePos);
+      restPole=restPole.subtract(dir.scale(BABYLON.Vector3.Dot(restPole,dir)));
+      pole=fwdPerp.add(restPole.scale(0.3));
+      if(pole.lengthSquared()<1e-8){
+        const helper=Math.abs(dir.y)<0.9?new BABYLON.Vector3(0,1,0):new BABYLON.Vector3(1,0,0);
+        pole=BABYLON.Vector3.Cross(dir,helper);
+      }
+    } else {
+      pole=st.restWorldPos[h].subtract(basePos);
+      pole=pole.subtract(dir.scale(BABYLON.Vector3.Dot(pole,dir)));
+      if(pole.lengthSquared()<1e-8){
+        const back=charForward().scale(-1);
+        pole=back.subtract(dir.scale(BABYLON.Vector3.Dot(back,dir)));
+        if(pole.lengthSquared()<1e-8){
+          const helper=Math.abs(dir.y)<0.9?new BABYLON.Vector3(0,1,0):new BABYLON.Vector3(1,0,0);
+          pole=BABYLON.Vector3.Cross(dir,helper);
+        }
+      }
+    }
+    pole.normalize();
+    const hingePos=mid.add(pole.scale(hh));
+    const dirA=safeNormalize(hingePos.subtract(basePos));
+    const dirB=safeNormalize(endPos.subtract(hingePos));
+    for(let i=baseIdx;i<h;i++){
+      const r=setBoneDirWorld(st,i,dirA);
+      if(reportOut) reportOut[i]=r;
+    }
+    for(let i=h;i<=eff-1;i++){
+      const r=setBoneDirWorld(st,i,dirB);
+      if(reportOut) reportOut[i]=r;
+    }
+  }
+}
+
+/* ===== Scene ===== */
+const canvas=document.getElementById("canvas");
+const engine=new BABYLON.Engine(canvas,true,{antialias:true});
+const scene=new BABYLON.Scene(engine);
+scene.clearColor=new BABYLON.Color4(0.05,0.06,0.08,1);
+const camera=new BABYLON.ArcRotateCamera("cam",-Math.PI/3,Math.PI/3.2,9,new BABYLON.Vector3(0,1,0),scene);
+camera.lowerRadiusLimit=2;camera.upperRadiusLimit=50;camera.minZ=0.05;
+camera.attachControl(canvas,true);
+camera.wheelDeltaPercentage=0.02;camera.panningSensibility=0;
+new BABYLON.HemisphericLight("h",new BABYLON.Vector3(0.2,1,0.2),scene).intensity=0.9;
+const dl=new BABYLON.DirectionalLight("d",new BABYLON.Vector3(-1,-2,-1),scene);
+dl.intensity=0.8;dl.position=new BABYLON.Vector3(5,10,5);
+
+const ground=BABYLON.MeshBuilder.CreateGround("g",{width:80,height:40},scene);
+const gmat=new BABYLON.StandardMaterial("gm",scene);
+gmat.diffuseColor=new BABYLON.Color3(0.14,0.16,0.18);
+gmat.specularColor=new BABYLON.Color3(0,0,0);
+ground.material=gmat;ground.isPickable=true;
+for(let i=-38;i<=38;i+=2){
+  const c=i===0?new BABYLON.Color3(0.35,0.55,0.35):(i%10===0?new BABYLON.Color3(0.22,0.24,0.28):new BABYLON.Color3(0.14,0.16,0.20));
+  const l1=BABYLON.MeshBuilder.CreateLines("gl",{points:[new BABYLON.Vector3(i,0.001,-20),new BABYLON.Vector3(i,0.001,20)]},scene);
+  l1.color=c;l1.isPickable=false;
+  const l2=BABYLON.MeshBuilder.CreateLines("gl",{points:[new BABYLON.Vector3(-38,0.001,i),new BABYLON.Vector3(38,0.001,i)]},scene);
+  l2.color=c;l2.isPickable=false;
+}
+
+function block(x,z,w,h,d,col){
+  const b=BABYLON.MeshBuilder.CreateBox("blk",{width:w,height:h,depth:d},scene);
+  b.position.set(x,h/2,z);
+  const m=new BABYLON.StandardMaterial("bm",scene);
+  m.diffuseColor=col;m.specularColor=new BABYLON.Color3(0,0,0);
+  b.material=m;b.isPickable=true;return b;
+}
+block(2,0,0.6,0.05,3.0,new BABYLON.Color3(0.50,0.30,0.35));
+block(3,0,0.6,0.10,3.0,new BABYLON.Color3(0.42,0.34,0.42));
+block(4,0,0.6,0.20,3.0,new BABYLON.Color3(0.35,0.40,0.50));
+block(6,0,0.6,0.30,3.0,new BABYLON.Color3(0.40,0.50,0.35));
+
+function addRamp(name,xLow,xHigh,z,width,tiltDeg){
+  const horizSpan=Math.abs(xHigh-xLow);
+  const rad=degToRad(tiltDeg);
+  const len=horizSpan/Math.cos(rad);
+  const rise=horizSpan*Math.tan(rad);
+  const midX=(xLow+xHigh)/2;
+  const midY=rise/2;
+  const g=BABYLON.MeshBuilder.CreateGround(name,{width:len,height:width,subdivisions:8},scene);
+  const m=new BABYLON.StandardMaterial(name+"m",scene);
+  m.diffuseColor=new BABYLON.Color3(0.32,0.28,0.36);
+  m.specularColor=new BABYLON.Color3(0,0,0);
+  g.material=m;
+  g.rotation.z=(xHigh>xLow)?rad:-rad;
+  g.position.set(midX,midY+0.001,z);
+  g.isPickable=true;
+  return g;
+}
+function addPlateau(name,x,z,w,d,y){
+  const g=BABYLON.MeshBuilder.CreateGround(name,{width:w,height:d},scene);
+  const m=new BABYLON.StandardMaterial(name+"m",scene);
+  m.diffuseColor=new BABYLON.Color3(0.28,0.32,0.30);
+  m.specularColor=new BABYLON.Color3(0,0,0);
+  g.material=m;
+  g.position.set(x,y+0.001,z);
+  g.isPickable=true;
+  return g;
+}
+const RAMP_ANGLE=15;
+const RAMP_SPAN=3;
+const RAMP_RISE=RAMP_SPAN*Math.tan(degToRad(RAMP_ANGLE));
+addRamp("rampUp",10,13,0,3,RAMP_ANGLE);
+addPlateau("plateau",14,0,2,3,RAMP_RISE);
+
+/* ===== Bumps ===== */
+const bumpColors=[
+  new BABYLON.Color3(0.35,0.45,0.28),
+  new BABYLON.Color3(0.45,0.38,0.28),
+  new BABYLON.Color3(0.28,0.38,0.25),
+  new BABYLON.Color3(0.40,0.42,0.38)
+];
+const bumpMats=bumpColors.map((c,i)=>{
+  const m=new BABYLON.StandardMaterial("bmpm_"+i,scene);
+  m.diffuseColor=c;
+  m.emissiveColor=c.scale(0.12);
+  m.specularColor=new BABYLON.Color3(0,0,0);
+  return m;
+});
+let _bumpIdx=0;
+function bump(x,z,r,h){
+  const s=BABYLON.MeshBuilder.CreateSphere("bump_"+(_bumpIdx++),{diameter:r*2,segments:8},scene);
+  s.position.set(x,h/2-0.015,z);
+  s.scaling.y=h/(r*2);
+  s.material=bumpMats[_bumpIdx%bumpMats.length];
+  s.isPickable=true;
+  return s;
+}
+const COLUMN_Z=[-2.4,-1.6,-0.8,0,0.8,1.6,2.4];
+const JITTER_Z=0.22;
+const TRANS_ROWS=18,TRANS_X0=15,TRANS_X1=22;
+for(let row=0;row<TRANS_ROWS;row++){
+  const t=row/(TRANS_ROWS-1);
+  const xBase=TRANS_X0+t*(TRANS_X1-TRANS_X0);
+  const hBase=Math.max(0.05,0.65*(1-t*t));
+  for(let j=0;j<COLUMN_Z.length;j++){
+    const zBase=COLUMN_Z[j];
+    const x=xBase+(Math.random()-0.5)*0.35;
+    const jit=(j===3)?(Math.random()-0.5)*0.15:(Math.random()-0.5)*JITTER_Z;
+    const z=zBase+jit;
+    const h=Math.max(0.02,hBase*(0.70+Math.random()*0.60));
+    const r=0.17+Math.random()*0.10;
+    bump(x,z,r,h);
+  }
+}
+const FIELD_ROWS=15,FIELD_X0=22,FIELD_X1=32;
+for(let row=0;row<FIELD_ROWS;row++){
+  const t=row/(FIELD_ROWS-1);
+  const xBase=FIELD_X0+t*(FIELD_X1-FIELD_X0);
+  for(let j=0;j<COLUMN_Z.length;j++){
+    const zBase=COLUMN_Z[j];
+    const x=xBase+(Math.random()-0.5)*0.40;
+    const jit=(j===3)?(Math.random()-0.5)*0.15:(Math.random()-0.5)*JITTER_Z;
+    const z=zBase+jit;
+    const h=0.03+Math.random()*0.15;
+    const r=0.14+Math.random()*0.14;
+    bump(x,z,r,h);
+  }
+}
+
+/* ===== Policy ===== */
+const IK_POLICY={
+  walk:{pelvis:1,foot:1},run:{pelvis:1,foot:1},sprint:{pelvis:1,foot:1},
+  crouch:{pelvis:1,foot:1},strafe:{pelvis:1,foot:1},injured:{pelvis:1,foot:1},
+  idle:{pelvis:1,foot:1},slide:{pelvis:0.3,foot:1},dodge:{pelvis:0.3,foot:1},
+  jump_land:{pelvis:1,foot:1},jump_air:{pelvis:0,foot:0},sit:{pelvis:0,foot:1},
+  crawl:{pelvis:0,foot:0},death:{pelvis:0,foot:0},none:{pelvis:0,foot:0}
+};
+const MODE_SPEED={
+  walk:0.8,run:2.2,sprint:4.2,crouch:0.45,strafe:0.8,injured:0.55,
+  idle:0,slide:3.0,dodge:0,jump_land:0,jump_air:0,sit:0,crawl:0,death:0,none:0
+};
+function animMode(name){
+  if(!name) return 'none';
+  const n=name.toLowerCase();
+  if(/crawl|climb/i.test(n)) return 'crawl';
+  if(/slide/i.test(n)) return 'slide';
+  if(/jump.*air|air.*jump|^fall$|jump.*start|jump.*prep/i.test(n)) return 'jump_air';
+  if(/jump.*land|jump.*end/i.test(n)) return 'jump_land';
+  if(/^jump$/i.test(n)) return 'jump_air';
+  if(/sit/i.test(n)) return 'sit';
+  if(/dodge/i.test(n)) return 'dodge';
+  if(/death|lay/i.test(n)) return 'death';
+  if(/idle/i.test(n)) return 'idle';
+  if(/injured|hurt/i.test(n)) return 'injured';
+  if(/crouch|stealth/i.test(n)) return 'crouch';
+  if(/strafe/i.test(n)) return 'strafe';
+  if(/sprint/i.test(n)) return 'sprint';
+  if(/jog|run/i.test(n)) return 'run';
+  if(/walk/i.test(n)) return 'walk';
+  return 'idle';
+}
+function estimateCycle(speed){
+  if(speed<0.1) return 1.2;
+  return clamp(1.2/(0.6+speed*0.4),0.35,1.6);
+}
+
+const CALIBRATABLE_ANIMS=[
+  "Idle_A","Idle_Subtle","Idle_Sword","Idle_Hurt","Idle_Default",
+  "Walk","Walk_Female","Walk_Formal","Walk_Backwards","Walk_Large","Walk_Stealth",
+  "Run","Run_Female","Run_Anime","Jog",
+  "Sprint",
+  "Crouch_Idle","Crouch_Walk",
+  "Strafe_left","Strafe_right",
+  "Slide","Push"
+];
+const EXTRA_POOL_ANIMS=[
+  "Kick_Breach","Punch_Jab","Punch_Cross",
+  "OverhandThrow","Throw_Object",
+  "Consume","Consume_Item",
+  "Cheering_Two_Hands","Confused","Yes"
+];
+function isCalibratable(name){return CALIBRATABLE_ANIMS.includes(name);}
+
+/* ===== State ===== */
+const S={
+  loaded:false,root:null,mesh:null,skeleton:null,
+  anims:[],animByName:new Map(),currentAnimGroup:null,currentAnim:null,
+  currentModelName:null,
+  pelvis:null,pelvisBasePos:null,
+  legs:{L:null,R:null},
+  yaw:Math.PI/2,
+  autoWalk:true,autoStart:-5,autoEnd:34,
+  rootVel:{x:0,z:0},
+  rootVelSmooth:{x:0,z:0},
+  predictive:true,
+  profiles:new Map(),
+  defaultProfile:null,
+  pendingCalib:null,
+  batchCalib:null,
+  pelvisDeltaY:0,pelvisDeltaYSmooth:0,
+  gaitPhase:0,gaitPhaseStart:0,gaitCycleDur:1.2,
+  _errShown:false
+};
+const $=id=>document.getElementById(id);
+function setH(id,t,cls){const el=$(id);if(!el)return;el.textContent=t;el.className=cls||"";}
+
+/* ===== Load ===== */
+const dropEl=$("drop"),fileEl=$("file"),dstatusEl=$("dstatus");
+dropEl.addEventListener("click",()=>fileEl.click());
+dropEl.addEventListener("dragover",e=>{e.preventDefault();dropEl.classList.add("drag");});
+dropEl.addEventListener("dragleave",()=>dropEl.classList.remove("drag"));
+dropEl.addEventListener("drop",e=>{e.preventDefault();dropEl.classList.remove("drag");const f=e.dataTransfer.files[0];if(f)loadChar(f);});
+fileEl.addEventListener("change",e=>{const f=e.target.files[0];if(f)loadChar(f);e.target.value="";});
+
+function disposeChar(){
+  if(S.root){try{S.root.dispose(false,true);}catch(e){}S.root=null;}
+  for(const g of S.anims){try{g.dispose();}catch(e){}}
+  S.anims=[];S.animByName.clear();
+  S.mesh=null;S.skeleton=null;S.pelvis=null;S.pelvisBasePos=null;
+  S.legs={L:null,R:null};
+  S.loaded=false;S.currentAnim=null;S.currentAnimGroup=null;
+  S.currentModelName=null;
+  S.profiles.clear();S.defaultProfile=null;S.pendingCalib=null;S.batchCalib=null;
+  S.pelvisDeltaY=0;S.pelvisDeltaYSmooth=0;
+  S.gaitPhase=0;S.gaitPhaseStart=0;S.gaitCycleDur=1.2;
+  S.rootVel={x:0,z:0};S.rootVelSmooth={x:0,z:0};
+  hideCalibBanner();
+}
+async function loadChar(file){
+  try{
+    const buf=await file.arrayBuffer();
+    disposeChar();
+    S.currentModelName=file.name;
+    dstatusEl.textContent="loading…";
+    BABYLON.SceneLoader.ImportMesh("","",new File([buf],file.name,{type:"model/gltf-binary"}),scene,
+      (meshes)=>onLoaded(file.name,meshes),
+      null,(_s,msg)=>{dstatusEl.textContent="err: "+msg;},".glb");
+  }catch(e){alert("Read error: "+e.message);}
+}
+function findLegBones(sk){
+  if(!sk||!sk.bones) return null;
+  const B=sk.bones;
+  const isL=(n)=>/_l$/i.test(n)||/\bleft\b/i.test(n);
+  const isR=(n)=>/_r$/i.test(n)||/\bright\b/i.test(n);
+  const tP=[/thigh/i,/upper_?leg/i,/upleg/i];
+  const sP=[/calf/i,/shin/i,/lower_?leg/i,/tibia/i];
+  const fP=[/foot/i,/ankle/i];
+  const pick=(ps,sc)=>B.find(x=>ps.some(re=>re.test(x.name))&&sc(x.name));
+  const L={thigh:pick(tP,isL),calf:pick(sP,isL),foot:pick(fP,isL)};
+  const R={thigh:pick(tP,isR),calf:pick(sP,isR),foot:pick(fP,isR)};
+  return {left:L,right:R,okL:!!(L.thigh&&L.calf&&L.foot),okR:!!(R.thigh&&R.calf&&R.foot)};
+}
+function findBallBone(skeleton,footBoneName){
+  if(!skeleton||!skeleton.bones) return null;
+  let side=null;
+  const m=footBoneName.match(/_([lr])$/i);
+  if(m) side='_'+m[1].toLowerCase();
+  else{
+    const m2=footBoneName.match(/(left|right)/i);
+    if(m2) side=m2[1].toLowerCase()==='left'?'_l':'_r';
+  }
+  const matches=skeleton.bones.filter(b=>/ball|toe/i.test(b.name)&&(!side||b.name.toLowerCase().endsWith(side)));
+  if(matches.length===0) return null;
+  matches.sort((a,b)=>a.name.length-b.name.length);
+  return matches[0].getTransformNode();
+}
+function buildLegChain(legBones,id){
+  const tn=(b)=>b?b.getTransformNode():null;
+  const nodes=[tn(legBones.thigh),tn(legBones.calf),tn(legBones.foot)].filter(Boolean);
+  if(nodes.length<3) return null;
+  const names=[legBones.thigh.name,legBones.calf.name,legBones.foot.name];
+  const cfg={id,baseIndex:0,hinge:1};
+  nodes.forEach(n=>{
+    if(!n.rotationQuaternion) n.rotationQuaternion=BABYLON.Quaternion.FromEulerVector(n.rotation.clone());
+    n.computeWorldMatrix(true);
+  });
+  const st={cfg,nodes,names,lengths:[],restWorldPos:[],restWorldDir:[],restWorldQuats:[],restLocalQuats:[],eff:0,totalLen:0,_seg:null};
+  st.restWorldPos=nodes.map(n=>n.getAbsolutePosition().clone());
+  st.restWorldQuats=nodes.map(n=>worldQuatOf(n));
+  st.restLocalQuats=nodes.map(n=>n.rotationQuaternion.clone());
+  for(let i=0;i<nodes.length-1;i++){
+    const p0=nodes[i].getAbsolutePosition();
+    const p1=nodes[i+1].getAbsolutePosition();
+    st.lengths.push(BABYLON.Vector3.Distance(p0,p1));
+    st.restWorldDir.push(safeNormalize(p1.subtract(p0)));
+  }
+  st.eff=nodes.length-1;
+  st.totalLen=sumLen(st.lengths,cfg.baseIndex,st.eff-1);
+  return st;
+}
+function mkLanding(){return {x:0,z:0,y:0,valid:false,locked:false};}
+
+function onLoaded(fileName,meshes){
+  const originalRoot=meshes.find(m=>!m.parent)||meshes[0];
+  const container=new BABYLON.TransformNode("charRoot",scene);
+  container.position.copyFrom(originalRoot.position);
+  if(originalRoot.rotationQuaternion){container.rotationQuaternion=originalRoot.rotationQuaternion.clone();}
+  else{container.rotationQuaternion=BABYLON.Quaternion.FromEulerVector(originalRoot.rotation);}
+  originalRoot.parent=container;
+  originalRoot.position.set(0,0,0);
+  originalRoot.scaling.set(1,1,1);
+  originalRoot.rotationQuaternion=BABYLON.Quaternion.Identity();
+  originalRoot.rotation.set(0,0,0);
+  S.root=container;
+  S.mesh=originalRoot;
+  for(const m of meshes){m.isChar=true;m.isPickable=false;}
+
+  S.skeleton=null;
+  for(const m of meshes) if(m.skeleton){S.skeleton=m.skeleton;break;}
+
+  S.anims=scene.animationGroups.slice();
+  S.animByName=new Map();
+  for(const g of S.anims) S.animByName.set(g.name,g);
+  for(const g of S.anims){try{g.stop();}catch(e){}}
+
+  const pelvisBone=S.skeleton.bones.find(b=>/pelvis|hips/i.test(b.name));
+  S.pelvis=pelvisBone?pelvisBone.getTransformNode():null;
+  S.pelvisBasePos=S.pelvis?S.pelvis.position.clone():null;
+
+  const res=findLegBones(S.skeleton);
+  if(!res||!res.okL||!res.okR){
+    dstatusEl.textContent="✗ legs not found";
+    setH("d_ll","missing","err");setH("d_lr","missing","err");
+    S.loaded=true;return;
+  }
+  const chL=buildLegChain(res.left,"leg_l");
+  const chR=buildLegChain(res.right,"leg_r");
+  if(!chL||!chR){
+    dstatusEl.textContent="✗ chain build failed";
+    S.loaded=true;return;
+  }
+  const ballL=findBallBone(S.skeleton,res.left.foot.name);
+  const ballR=findBallBone(S.skeleton,res.right.foot.name);
+
+  S.legs.L={ chain:chL, ballTn:ballL, blendSmooth:0,
+             toeGroundYSmooth:null, appliedPitchDeg:0, toePenetr:0,
+             landing:mkLanding() };
+  S.legs.R={ chain:chR, ballTn:ballR, blendSmooth:0,
+             toeGroundYSmooth:null, appliedPitchDeg:0, toePenetr:0,
+             landing:mkLanding() };
+
+  setH("d_pb",S.pelvis?S.pelvis.name:"NOT FOUND",S.pelvis?"ok":"err");
+  setH("d_ll",`${res.left.thigh.name}→${res.left.calf.name}→${res.left.foot.name}`,"ok");
+  setH("d_lr",`${res.right.thigh.name}→${res.right.calf.name}→${res.right.foot.name}`,"ok");
+  setH("d_bb",`L:${ballL?ballL.name:"—"} / R:${ballR?ballR.name:"—"}`,(ballL&&ballR)?"ok":"warn");
+
+  S.loaded=true;
+  dstatusEl.textContent="✓ "+fileName;
+
+  S.root.position.set(0,0,0);
+  S.root.computeWorldMatrix(true);
+  try{
+    const bb=S.mesh.getHierarchyBoundingInfo().boundingBox;
+    if(bb) S.root.position.y-=bb.minimumWorld.y;
+  }catch(e){}
+  S.root.position.x=S.autoStart;
+  S.root.position.z=0;
+  S.yaw=Math.PI/2;
+  S.root.rotationQuaternion=BABYLON.Quaternion.RotationYawPitchRoll(S.yaw,0,0);
+  S.root.computeWorldMatrix(true);
+
+  S.gaitPhase=0;
+  S.gaitPhaseStart=performance.now()/1000;
+  S.gaitCycleDur=1.2;
+
+  buildAnimButtons();
+  const first=S.animByName.get("Walk")
+    ||S.anims.find(a=>/walk/i.test(a.name))
+    ||S.animByName.get("Idle_A")
+    ||S.anims.find(a=>/idle/i.test(a.name))
+    ||S.anims[0];
+  if(first) selectTestAnim(first.name);
+
+  if(autoCalCheckbox && autoCalCheckbox.checked){
+    S.autoWalk=false;
+    startBatchCalibration();
+  } else {
+    S.autoWalk=true;
+  }
+}
+
+function refreshAnimButtonMarks(){
+  document.querySelectorAll('#animBtns button').forEach(b=>{
+    b.classList.toggle('calibrated',S.profiles.has(b.dataset.anim));
+  });
+}
+function buildAnimButtons(){
+  const wrap=$("animBtns");if(!wrap) return;wrap.innerHTML='';
+  CALIBRATABLE_ANIMS.filter(n=>S.animByName.has(n)).forEach(n=>{
+    const b=document.createElement('button');
+    b.textContent=n;b.dataset.anim=n;
+    if(n===S.currentAnim) b.classList.add('on');
+    if(S.profiles.has(n)) b.classList.add('calibrated');
+    b.addEventListener('click',()=>selectTestAnim(n));
+    wrap.appendChild(b);
+  });
+  const availExtra=EXTRA_POOL_ANIMS.filter(n=>S.animByName.has(n));
+  if(availExtra.length){
+    const sep=document.createElement("span");
+    sep.textContent=" · ";
+    sep.style.color="#666";
+    wrap.appendChild(sep);
+  }
+  availExtra.forEach(n=>{
+    const b=document.createElement('button');
+    b.textContent=n;b.dataset.anim=n;
+    b.classList.add('extra');
+    if(n===S.currentAnim) b.classList.add('on');
+    b.addEventListener('click',()=>selectTestAnim(n));
+    wrap.appendChild(b);
+  });
+  updateCalibCountHud();
+}
+function selectTestAnim(name,fromBatch){
+  if(!S.loaded) return;
+  if(!fromBatch && S.batchCalib && S.batchCalib.active){
+    S.batchCalib.active=false;
+    S.batchCalib=null;
+    S.autoWalk=true;
+    hideCalibBanner();
+    setH("d_cst","batch cancelled","warn");
+  }
+  const g=S.animByName.get(name);
+  if(!g){setH("d_an",`${name} (missing)`,"err");return;}
+
+  const isSame=(S.currentAnim===name);
+  if(S.currentAnimGroup && S.currentAnimGroup!==g){
+    try{S.currentAnimGroup.stop();}catch(e){}
+    try{S.currentAnimGroup.weight=0;}catch(e){}
+  }
+  const noLoop=/jump|slide|dodge|death|lay|sit.*enter|sit.*exit|punch|kick|interact|chest|farm|pickup|push|throw|consume/i.test(name);
+  try{g.start(noLoop?false:true,1);g.weight=1;}catch(e){}
+  S.currentAnimGroup=g;
+  S.currentAnim=name;
+  setH("d_an",name,"ok");
+  document.querySelectorAll('#animBtns button').forEach(b=>b.classList.toggle('on',b.dataset.anim===name));
+
+  if(S.legs.L){S.legs.L.blendSmooth=0;S.legs.L.toeGroundYSmooth=null;S.legs.L.landing=mkLanding();S.legs.L.toePenetr=0;}
+  if(S.legs.R){S.legs.R.blendSmooth=0;S.legs.R.toeGroundYSmooth=null;S.legs.R.landing=mkLanding();S.legs.R.toePenetr=0;}
+
+  if(!isSame){
+    S.gaitPhase=0;
+    S.gaitPhaseStart=performance.now()/1000;
+    const m=animMode(name);
+    const spd=(m in MODE_SPEED)?MODE_SPEED[m]:0.8;
+    S.gaitCycleDur=estimateCycle(spd);
+  }
+}
+
+function applyPelvisDeltaWorldY(dy){
+  if(!S.pelvis) return;
+  const parWQ=S.pelvis.parent?worldQuatOf(S.pelvis.parent):BABYLON.Quaternion.Identity();
+  const inv=parWQ.clone().invert();
+  const mat=BABYLON.Matrix.Identity();
+  BABYLON.Matrix.FromQuaternionToRef(inv,mat);
+  const localVec=BABYLON.Vector3.TransformNormal(new BABYLON.Vector3(0,dy,0),mat);
+  S.pelvis.position.addInPlace(localVec);
+  S.pelvis.computeWorldMatrix(true);
+}
+
+function raycastDown(x,yFrom,z,len){
+  const origin=new BABYLON.Vector3(x,yFrom,z);
+  const ray=new BABYLON.Ray(origin,new BABYLON.Vector3(0,-1,0),len);
+  const pick=scene.pickWithRay(ray,m=>m.isPickable && !m.isChar);
+  if(pick && pick.hit){
+    return {y:pick.pickedPoint.y};
+  }
+  return {y:null};
+}
+function smoothToeGround(legState,raw,dt){
+  if(!raw||raw.y===null) return;
+  if(legState.toeGroundYSmooth===null){legState.toeGroundYSmooth=raw.y;return;}
+  const k=dampFactor(dt,0.06);
+  legState.toeGroundYSmooth+=(raw.y-legState.toeGroundYSmooth)*k;
+}
+
+/* ===== Predict landing XZ — with commit + hysteresis ===== */
+function predictLandingXZ(legState, dt){
+  const chain=legState.chain;
+  const ankle=chain.nodes[2].getAbsolutePosition();
+  const blend=legState.blendSmooth;
+  const L=legState.landing;
+
+  // Hard lock at plant
+  if(blend>=PRED_LOCK_BLEND || (L.locked && blend>=PRED_LOCK_EXIT)){
+    if(L.valid){
+      const r=raycastDown(L.x, ankle.y+1.5, L.z, 4.0);
+      if(r.y!==null){
+        const kY=dampFactor(dt,PRED_SMOOTH_TAU_Y);
+        L.y+=(r.y-L.y)*kY;
+      }
+    }
+    L.locked=true;
+    return L;
+  }
+  L.locked=false;
+
+  // Soft commit: freeze XZ, update Y only (close to plant)
+  if(blend>=PRED_COMMIT_BLEND && L.valid){
+    const r=raycastDown(L.x, ankle.y+1.5, L.z, 4.0);
+    if(r.y!==null){
+      const kY=dampFactor(dt,PRED_SMOOTH_TAU_Y);
+      L.y+=(r.y-L.y)*kY;
+    }
+    return L;
+  }
+
+  // Free search phase
+  const swingDur=Math.max(0.10, 0.4*(S.gaitCycleDur||1.2));
+  const timeToLand=clamp(1-blend, 0, 1) * swingDur;
+  const vel=S.rootVelSmooth||S.rootVel;
+  let gx=ankle.x+vel.x*timeToLand;
+  let gz=ankle.z+vel.z*timeToLand;
+
+  const hip=chain.nodes[0].getAbsolutePosition();
+  const dx=gx-hip.x,dz=gz-hip.z;
+  const horiz=Math.hypot(dx,dz);
+  const maxH=chain.totalLen*0.85;
+  if(horiz>maxH && horiz>1e-6){
+    gx=hip.x+(dx/horiz)*maxH;
+    gz=hip.z+(dz/horiz)*maxH;
+  }
+
+  let bestX=gx, bestZ=gz, bestY=null;
+  const baseR=raycastDown(gx, ankle.y+1.5, gz, 4.0);
+  if(baseR.y!==null) bestY=baseR.y;
+
+  for(let i=0;i<8;i++){
+    const ang=(i/8)*Math.PI*2;
+    const px=gx+Math.cos(ang)*PRED_RADIUS;
+    const pz=gz+Math.sin(ang)*PRED_RADIUS;
+    const hit=raycastDown(px, ankle.y+1.5, pz, 4.0);
+    if(hit.y===null) continue;
+    if(bestY===null || hit.y>bestY+PRED_RAISE_THRESHOLD){
+      bestY=hit.y; bestX=px; bestZ=pz;
+    }
+  }
+  if(bestY===null) return L;
+
+  // Hysteresis: if best is near current landing XZ, stick with current
+  if(L.valid){
+    const dCur=Math.hypot(bestX-L.x, bestZ-L.z);
+    if(dCur < PRED_HYSTERESIS){
+      const r=raycastDown(L.x, ankle.y+1.5, L.z, 4.0);
+      if(r.y!==null){
+        bestX=L.x; bestZ=L.z; bestY=r.y;
+      }
+    }
+  }
+
+  const offX=bestX-ankle.x, offZ=bestZ-ankle.z;
+  const offLen=Math.hypot(offX,offZ);
+  if(offLen>PRED_MAX_OFFSET && offLen>1e-6){
+    const k=PRED_MAX_OFFSET/offLen;
+    bestX=ankle.x+offX*k;
+    bestZ=ankle.z+offZ*k;
+    const r=raycastDown(bestX, ankle.y+1.5, bestZ, 4.0);
+    if(r.y!==null) bestY=r.y;
+  }
+
+  if(!L.valid){
+    L.x=bestX; L.z=bestZ; L.y=bestY; L.valid=true;
+  } else {
+    const kXZ=dampFactor(dt,PRED_SMOOTH_TAU_XZ);
+    L.x+=(bestX-L.x)*kXZ;
+    L.z+=(bestZ-L.z)*kXZ;
+    const kY=dampFactor(dt,PRED_SMOOTH_TAU_Y);
+    L.y+=(bestY-L.y)*kY;
+  }
+  return L;
+}
+
+/* ===== Calibration ===== */
+function startCalibration(animName){
+  const g=S.animByName.get(animName);
+  const dur=g?Math.max(0.1,(g.to-g.from)/60):1.0;
+  const maxFrames=clamp(Math.floor(dur*60),15,90);
+  S.pendingCalib={
+    animName,frames:0,maxFrames,
+    L:{minAnkleY:Infinity,maxAnkleY:-Infinity,minGroundY:Infinity,minBallY:Infinity},
+    R:{minAnkleY:Infinity,maxAnkleY:-Infinity,minGroundY:Infinity,minBallY:Infinity},
+    lastAdvanceTime:performance.now()
+  };
+  setH("d_cst",`${animName} 0/${maxFrames}…`,"warn");
+  const b=S.batchCalib;
+  if(b && b.active){
+    b.lastAdvanceTime=performance.now();
+    showCalibBanner(animName,b.idx,b.total,b.idx/b.total);
+  }
+}
+function calibrationTick(dt){
+  const c=S.pendingCalib;if(!c) return;
+  const cL=S.legs.L.chain,cR=S.legs.R.chain;
+  cL.nodes[2].computeWorldMatrix(true);
+  cR.nodes[2].computeWorldMatrix(true);
+  const aYL=cL.nodes[2].getAbsolutePosition().y;
+  const aYR=cR.nodes[2].getAbsolutePosition().y;
+  const pL=cL.nodes[2].getAbsolutePosition();
+  const pR=cR.nodes[2].getAbsolutePosition();
+  const rL=raycastDown(pL.x,pL.y+2.0,pL.z,4.0);
+  const rR=raycastDown(pR.x,pR.y+2.0,pR.z,4.0);
+  if(rL.y!==null){
+    if(aYL<c.L.minAnkleY) c.L.minAnkleY=aYL;
+    if(aYL>c.L.maxAnkleY) c.L.maxAnkleY=aYL;
+    if(rL.y<c.L.minGroundY) c.L.minGroundY=rL.y;
+  }
+  if(rR.y!==null){
+    if(aYR<c.R.minAnkleY) c.R.minAnkleY=aYR;
+    if(aYR>c.R.maxAnkleY) c.R.maxAnkleY=aYR;
+    if(rR.y<c.R.minGroundY) c.R.minGroundY=rR.y;
+  }
+  if(S.legs.L.ballTn){
+    S.legs.L.ballTn.computeWorldMatrix(true);
+    const bY=S.legs.L.ballTn.getAbsolutePosition().y;
+    if(bY<c.L.minBallY) c.L.minBallY=bY;
+  }
+  if(S.legs.R.ballTn){
+    S.legs.R.ballTn.computeWorldMatrix(true);
+    const bY=S.legs.R.ballTn.getAbsolutePosition().y;
+    if(bY<c.R.minBallY) c.R.minBallY=bY;
+  }
+  c.frames++;
+  setH("d_cst",`${c.animName} ${c.frames}/${c.maxFrames}…`,"warn");
+  const b=S.batchCalib;
+  if(b && b.active){
+    const frac=(b.idx+c.frames/c.maxFrames)/b.total;
+    showCalibBanner(c.animName,b.idx,b.total,frac);
+  }
+  if(c.frames>=c.maxFrames) finalizeCalibration();
+}
+function finalizeCalibration(){
+  const c=S.pendingCalib;if(!c) return;
+  const okL=isFinite(c.L.minAnkleY)&&isFinite(c.L.minGroundY);
+  const okR=isFinite(c.R.minAnkleY)&&isFinite(c.R.minGroundY);
+  if(!okL||!okR){
+    console.warn("[calib] failed:",c.animName);
+    setH("d_cst",`${c.animName}: failed`,"err");
+    S.pendingCalib=null;
+    advanceBatchIfActive();
+    return;
+  }
+  const rawOffL=c.L.minAnkleY-c.L.minGroundY;
+  const rawOffR=c.R.minAnkleY-c.R.minGroundY;
+  let offL=Math.max(MIN_ANKLE_OFFSET,rawOffL);
+  let offR=Math.max(MIN_ANKLE_OFFSET,rawOffR);
+  if(offL>MAX_ANKLE_OFFSET){console.warn("[calib] offL out:",rawOffL);offL=0.05;}
+  if(offR>MAX_ANKLE_OFFSET){console.warn("[calib] offR out:",rawOffR);offR=0.05;}
+
+  const swingL=Math.max(0.02,c.L.maxAnkleY-c.L.minAnkleY);
+  const swingR=Math.max(0.02,c.R.maxAnkleY-c.R.minAnkleY);
+  const ballOffL=isFinite(c.L.minBallY)?Math.max(0,c.L.minBallY-c.L.minGroundY):0;
+  const ballOffR=isFinite(c.R.minBallY)?Math.max(0,c.R.minBallY-c.R.minGroundY):0;
+  const restGroundY=Math.min(
+    isFinite(c.L.minGroundY)?c.L.minGroundY:0,
+    isFinite(c.R.minGroundY)?c.R.minGroundY:0
+  );
+
+  const prof={
+    restAnkleOffsetL:offL,restAnkleOffsetR:offR,
+    minAnkleYL:c.L.minAnkleY,minAnkleYR:c.R.minAnkleY,
+    swingAmpL:swingL,swingAmpR:swingR,
+    ballRestOffsetL:ballOffL,ballRestOffsetR:ballOffR,
+    restGroundY
+  };
+  S.profiles.set(c.animName,prof);
+  if(!S.defaultProfile) S.defaultProfile=prof;
+
+  setH("d_cst",`${c.animName}: done`,"ok");
+  updateCalibCountHud();
+  refreshAnimButtonMarks();
+  S.pendingCalib=null;
+  advanceBatchIfActive();
+}
+function updateCalibCountHud(){
+  const avail=CALIBRATABLE_ANIMS.filter(n=>S.animByName.has(n)).length;
+  setH("d_pc",`${S.profiles.size} / ${avail}`);
+}
+function getActiveProfile(){
+  const anim=S.currentAnim;if(!anim) return null;
+  if(S.profiles.has(anim)){
+    const p=S.profiles.get(anim);
+    if(p && typeof p==="object" && typeof p.restAnkleOffsetL==="number"){
+      setH("d_pr",`${anim} (${animMode(anim)})`,"ok");
+      return p;
+    }
+  }
+  if(EXTRA_POOL_ANIMS.includes(anim)){
+    setH("d_pr",`fallback (${anim})`,"warn");
+    return S.defaultProfile||S.profiles.get("Walk")||null;
+  }
+  if(!S.pendingCalib || S.pendingCalib.animName!==anim){
+    startCalibration(anim);
+  }
+  setH("d_pr",`calibrating…`,"warn");
+  return null;
+}
+
+function startBatchCalibration(){
+  if(!S.loaded) return;
+  const available=CALIBRATABLE_ANIMS.filter(n=>S.animByName.has(n) && !S.profiles.has(n));
+  if(available.length===0){
+    setH("d_cst","all calibratable done","ok");
+    S.autoWalk=true;
+    hideCalibBanner();
+    return;
+  }
+  S.autoWalk=false;
+  S.batchCalib={queue:available,idx:0,total:available.length,active:true,lastAdvanceTime:performance.now()};
+  console.log(`[calib] batch start: ${available.length} anims`);
+  setH("d_cst",`batch 1/${available.length}: ${available[0]}`,"warn");
+  showCalibBanner(available[0],0,available.length,0);
+  selectTestAnim(available[0],true);
+}
+function advanceBatchIfActive(){
+  const b=S.batchCalib;
+  if(!b||!b.active) return;
+  b.idx++;
+  b.lastAdvanceTime=performance.now();
+  if(b.idx>=b.queue.length){
+    b.active=false;
+    setH("d_cst",`batch done: ${b.total} anims`,"ok");
+    const back=S.animByName.get("Walk")||S.animByName.get(b.queue[0]);
+    if(back) selectTestAnim(back.name,true);
+    S.batchCalib=null;
+    S.autoWalk=true;
+    hideCalibBanner();
+    return;
+  }
+  const anim=b.queue[b.idx];
+  setH("d_cst",`batch ${b.idx+1}/${b.total}: ${anim}`,"warn");
+  showCalibBanner(anim,b.idx,b.total,b.idx/b.total);
+  selectTestAnim(anim,true);
+}
+
+function snapshotChain(st){
+  for(let i=0;i<st.nodes.length;i++){
+    st.nodes[i].computeWorldMatrix(true);
+    st.restWorldPos[i]=st.nodes[i].getAbsolutePosition().clone();
+    st.restWorldQuats[i]=worldQuatOf(st.nodes[i]);
+  }
+  for(let i=0;i<st.nodes.length-1;i++){
+    st.restWorldDir[i]=safeNormalize(st.restWorldPos[i+1].subtract(st.restWorldPos[i]));
+  }
+  if(st.cfg.hinge>=0 && st.cfg.hinge<=st.eff){
+    const h=st.cfg.hinge;
+    st._seg={
+      La:sumLen(st.lengths,st.cfg.baseIndex,h-1),
+      Lb:sumLen(st.lengths,h,st.eff-1)
+    };
+  }
+}
+
+function solveLegOverlay(legState, targetY, animAnkleY, blend, targetX, targetZ){
+  const st=legState.chain;
+  if(targetY===null || blend<=0.001){
+    return {beta0:null,betaApplied:null,blend,lift:0};
+  }
+  const lift=animAnkleY-targetY;
+  const anklePos=st.nodes[2].getAbsolutePosition();
+  const ikY=anklePos.y+(targetY-anklePos.y)*blend;
+  const tx=(targetX!==undefined)?targetX:anklePos.x;
+  const tz=(targetZ!==undefined)?targetZ:anklePos.z;
+  const ikX=anklePos.x+(tx-anklePos.x)*blend;
+  const ikZ=anklePos.z+(tz-anklePos.z)*blend;
+  const ikTarget=new BABYLON.Vector3(ikX,ikY,ikZ);
+
+  snapshotChain(st);
+  const beta0=angleBetween(st.restWorldDir[0],st.restWorldDir[1]);
+  const report={};
+  solveHingeFromEnd(st,st.cfg,ikTarget,report);
+  const pNow=safeNormalize(st.nodes[1].getAbsolutePosition().subtract(st.nodes[0].getAbsolutePosition()));
+  const cNow=safeNormalize(st.nodes[2].getAbsolutePosition().subtract(st.nodes[1].getAbsolutePosition()));
+  const betaAfter=angleBetween(pNow,cNow);
+  return {beta0,betaApplied:betaAfter,blend,lift};
+}
+
+/* ===== Orient foot — iterative probe ===== */
+function orientFootFromToe(legState, blend, ballRestOffset){
+  const st=legState.chain;
+  const footTn=st.nodes[2];
+  const ballTn=legState.ballTn;
+  legState.appliedPitchDeg=0;
+  legState.toePenetr=0;
+  if(!ballTn || blend<=0.01) return;
+
+  footTn.computeWorldMatrix(true);
+  ballTn.computeWorldMatrix(true);
+  const ankleW=footTn.getAbsolutePosition();
+  const ballW=ballTn.getAbsolutePosition();
+
+  const dx=ballW.x-ankleW.x;
+  const dz=ballW.z-ankleW.z;
+  const horizLen=Math.sqrt(dx*dx+dz*dz);
+  const L=Math.hypot(dx, dz, ballW.y-ankleW.y);
+  if(L<1e-5) return;
+
+  let hx, hz;
+  if(horizLen>L*0.3){
+    hx=dx/horizLen; hz=dz/horizLen;
+  } else {
+    const fwd=charForward();
+    hx=fwd.x; hz=fwd.z;
+  }
+
+  let d=L*0.9;
+  for(let iter=0; iter<FOOT_PROBE_ITERS; iter++){
+    const px=ankleW.x+hx*d;
+    const pz=ankleW.z+hz*d;
+    const r=raycastDown(px, ankleW.y+1.5, pz, 4.0);
+    if(r.y===null) break;
+    const targetBallY=r.y+ballRestOffset;
+    const dy=ankleW.y-targetBallY;
+    const sinPitch=clamp(dy/L, -1, 1);
+    const cosPitch=Math.sqrt(Math.max(0, 1-sinPitch*sinPitch));
+    const newD=Math.max(L*0.3, L*cosPitch);
+    if(Math.abs(newD-d)<0.002){ d=newD; break; }
+    d=newD;
+  }
+
+  const probeX=ankleW.x+hx*d;
+  const probeZ=ankleW.z+hz*d;
+  const toeRaw=raycastDown(probeX, ankleW.y+1.5, probeZ, 4.0);
+  smoothToeGround(legState, toeRaw, frameDt);
+  const toeY=legState.toeGroundYSmooth;
+  if(toeY===null) return;
+
+  legState.toePenetr = (toeY+ballRestOffset) - ballW.y;
+
+  const dyNorm=clamp((toeY+ballRestOffset-ankleW.y)/L, -1, 1);
+  const hComp=Math.sqrt(Math.max(0, 1-dyNorm*dyNorm));
+  const desiredDir=new BABYLON.Vector3(hx*hComp, dyNorm, hz*hComp);
+  const currentDir=new BABYLON.Vector3(dx/L, (ballW.y-ankleW.y)/L, dz/L);
+
+  const pitchRad=angleBetween(currentDir, desiredDir);
+  legState.appliedPitchDeg=radToDeg(pitchRad*blend);
+  if(pitchRad<1e-5) return;
+
+  const axis=BABYLON.Vector3.Cross(currentDir, desiredDir);
+  if(axis.lengthSquared()<1e-10) return;
+  axis.normalize();
+  const appliedAngle=pitchRad*blend;
+  const deltaQ=quatFromAxisAngle(axis, appliedAngle, new BABYLON.Quaternion());
+
+  const parentWQ=footTn.parent?worldQuatOf(footTn.parent):BABYLON.Quaternion.Identity();
+  const qAnimLocal=footTn.rotationQuaternion?footTn.rotationQuaternion.clone():BABYLON.Quaternion.FromEulerVector(footTn.rotation.clone());
+  const qAnimWorld=parentWQ.multiply(qAnimLocal);
+  const qTargetWorld=deltaQ.multiply(qAnimWorld);
+  const parentInv=parentWQ.clone().invert();
+  footTn.rotationQuaternion=parentInv.multiply(qTargetWorld);
+  footTn.computeWorldMatrix(true);
+}
+
+/* ===== Export/Import ===== */
+const btnBatchCalib=document.getElementById("btnBatchCalib");
+const btnPredToggle=document.getElementById("btnPredToggle");
+const btnExportCalib=document.getElementById("btnExportCalib");
+const btnImportCalib=document.getElementById("btnImportCalib");
+const calibFile=document.getElementById("calibFile");
+
+btnPredToggle.addEventListener("click",()=>{
+  S.predictive=!S.predictive;
+  btnPredToggle.textContent=`Predictive: ${S.predictive?"ON":"OFF"}`;
+  btnPredToggle.classList.toggle("on",S.predictive);
+  if(!S.predictive){
+    S.legs.L.landing=mkLanding();
+    S.legs.R.landing=mkLanding();
+  }
+  setH("d_pred",S.predictive?"ON":"OFF",S.predictive?"on":"off");
+});
+
+function exportCalibration(){
+  const data={version:2,model:S.currentModelName||"unknown",exportedAt:new Date().toISOString(),profiles:{}};
+  for(const [name,p] of S.profiles) data.profiles[name]=p;
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  const safeModel=(S.currentModelName||"model").replace(/\.glb$/i,"");
+  a.href=url;a.download=`ik_calibration_${safeModel}.json`;a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),100);
+}
+async function importCalibration(file){
+  try{
+    const txt=await file.text();
+    const data=JSON.parse(txt);
+    if(!data || !data.profiles){alert("Invalid calibration file");return;}
+    let count=0;
+    for(const [name,p] of Object.entries(data.profiles)){
+      if(!p||typeof p!=="object") continue;
+      if(typeof p.restAnkleOffsetL!=="number"||typeof p.restAnkleOffsetR!=="number") continue;
+      S.profiles.set(name,{
+        restAnkleOffsetL:ensureNum(p.restAnkleOffsetL,0.05),
+        restAnkleOffsetR:ensureNum(p.restAnkleOffsetR,0.05),
+        minAnkleYL:ensureNum(p.minAnkleYL,0),
+        minAnkleYR:ensureNum(p.minAnkleYR,0),
+        swingAmpL:ensureNum(p.swingAmpL,0.05),
+        swingAmpR:ensureNum(p.swingAmpR,0.05),
+        ballRestOffsetL:ensureNum(p.ballRestOffsetL,0.02),
+        ballRestOffsetR:ensureNum(p.ballRestOffsetR,0.02),
+        restGroundY:ensureNum(p.restGroundY,0)
+      });
+      count++;
+    }
+    S.defaultProfile=S.profiles.get("Walk")||S.profiles.values().next().value||null;
+    S.pendingCalib=null;S.batchCalib=null;S.autoWalk=true;
+    hideCalibBanner();
+    updateCalibCountHud();
+    refreshAnimButtonMarks();
+    setH("d_cst",`imported ${count}`,"ok");
+  }catch(e){alert("Import failed: "+e.message);}
+}
+btnBatchCalib.addEventListener("click",startBatchCalibration);
+btnExportCalib.addEventListener("click",exportCalibration);
+btnImportCalib.addEventListener("click",()=>calibFile.click());
+calibFile.addEventListener("change",async (e)=>{
+  const f=e.target.files[0];
+  if(f) await importCalibration(f);
+  e.target.value="";
+});
+
+/* ===== Frame loop ===== */
+let frameCount=0,lastTime=performance.now(),frameDt=0.016;
+
+scene.onBeforeAnimationsObservable.add(()=>{
+  if(!S.loaded) return;
+  if(S.pelvis && S.pelvisBasePos) S.pelvis.position.copyFrom(S.pelvisBasePos);
+  for(const side of ['L','R']){
+    const st=S.legs[side] && S.legs[side].chain;
+    if(!st) continue;
+    for(let i=0;i<st.nodes.length;i++){
+      st.nodes[i].rotationQuaternion=st.restLocalQuats[i].clone();
+      st.nodes[i].computeWorldMatrix(true);
+    }
+  }
+});
+
+scene.onAfterAnimationsObservable.add(()=>{
+  try{
+    frameCount++;setH("d_fr",String(frameCount));
+    if(!S.loaded||!S.skeleton||!S.pelvis||!S.legs.L||!S.legs.R) return;
+
+    const dt=frameDt;
+
+    for(const side of ['L','R']){
+      const st=S.legs[side].chain;
+      for(let i=0;i<st.nodes.length;i++){
+        st.restLocalQuats[i]=st.nodes[i].rotationQuaternion.clone();
+      }
+    }
+
+    if(S.batchCalib && S.batchCalib.active && S.batchCalib.lastAdvanceTime){
+      const stuck=performance.now()-S.batchCalib.lastAdvanceTime;
+      if(stuck>6000){
+        console.warn(`[calib] batch stuck, force-advancing`);
+        if(S.pendingCalib) S.pendingCalib=null;
+        advanceBatchIfActive();
+      }
+    }
+
+    if(S.pendingCalib){ calibrationTick(dt); return; }
+
+    const profile=getActiveProfile();
+    if(!profile) return;
+
+    const cL=S.legs.L.chain,cR=S.legs.R.chain;
+    cL.nodes[2].computeWorldMatrix(true);
+    cR.nodes[2].computeWorldMatrix(true);
+    const animAnklePosL=cL.nodes[2].getAbsolutePosition();
+    const animAnklePosR=cR.nodes[2].getAbsolutePosition();
+    const animAnkleYL=animAnklePosL.y;
+    const animAnkleYR=animAnklePosR.y;
+    const animAnkleXL=animAnklePosL.x;
+    const animAnkleZL=animAnklePosL.z;
+    const animAnkleXR=animAnklePosR.x;
+    const animAnkleZR=animAnklePosR.z;
+
+    const rawBlendL=clamp(1-(animAnkleYL-profile.minAnkleYL)/profile.swingAmpL,0,1);
+    const rawBlendR=clamp(1-(animAnkleYR-profile.minAnkleYR)/profile.swingAmpR,0,1);
+    const kBlend=dampFactor(dt,0.05);
+    S.legs.L.blendSmooth+=(rawBlendL-S.legs.L.blendSmooth)*kBlend;
+    S.legs.R.blendSmooth+=(rawBlendR-S.legs.R.blendSmooth)*kBlend;
+    const blendL=S.legs.L.blendSmooth;
+    const blendR=S.legs.R.blendSmooth;
+
+    // Predict landing (if enabled)
+    let landL=null, landR=null;
+    if(S.predictive){
+      landL=predictLandingXZ(S.legs.L,dt);
+      landR=predictLandingXZ(S.legs.R,dt);
+    }
+
+    const computeInfl=(blend)=>{
+      const t=clamp(blend,0,1);
+      if(t<=PRED_LOCK_BLEND){
+        return t*t*(3-2*t)*PRED_INFLUENCE;
+      }
+      const k=(t-PRED_LOCK_BLEND)/(1-PRED_LOCK_BLEND);
+      return PRED_INFLUENCE+(PRED_INFLUENCE_AT_PLANT-PRED_INFLUENCE)*k;
+    };
+
+    let mixLX=animAnkleXL, mixLZ=animAnkleZL;
+    let mixRX=animAnkleXR, mixRZ=animAnkleZR;
+    if(landL && landL.valid){
+      const inflL=computeInfl(blendL);
+      mixLX=animAnkleXL+(landL.x-animAnkleXL)*inflL;
+      mixLZ=animAnkleZL+(landL.z-animAnkleZL)*inflL;
+    }
+    if(landR && landR.valid){
+      const inflR=computeInfl(blendR);
+      mixRX=animAnkleXR+(landR.x-animAnkleXR)*inflR;
+      mixRZ=animAnkleZR+(landR.z-animAnkleZR)*inflR;
+    }
+
+    let heelYL, heelYR;
+    if(landL && landL.valid && landL.locked){
+      heelYL=landL.y;
+    } else {
+      const rL=raycastDown(mixLX, animAnkleYL+1.5, mixLZ, 4.0);
+      heelYL=rL.y!==null?rL.y:animAnkleYL;
+    }
+    if(landR && landR.valid && landR.locked){
+      heelYR=landR.y;
+    } else {
+      const rR=raycastDown(mixRX, animAnkleYR+1.5, mixRZ, 4.0);
+      heelYR=rR.y!==null?rR.y:animAnkleYR;
+    }
+
+    const tgtYL=heelYL+profile.restAnkleOffsetL;
+    const tgtYR=heelYR+profile.restAnkleOffsetR;
+
+    let pelvisTarget=S.pelvisDeltaYSmooth;
+    const planted=[];
+    if(blendL>0.7) planted.push(heelYL-profile.restGroundY);
+    if(blendR>0.7) planted.push(heelYR-profile.restGroundY);
+    if(planted.length>0) pelvisTarget=Math.min.apply(null,planted);
+    S.pelvisDeltaYSmooth+=(pelvisTarget-S.pelvisDeltaYSmooth)*dampFactor(dt,0.14);
+    S.pelvisDeltaY=S.pelvisDeltaYSmooth;
+
+    S.pelvis.computeWorldMatrix(true);
+    if(S.pelvisBasePos) S.pelvisBasePos.copyFrom(S.pelvis.position);
+    const p1y=S.pelvis.getAbsolutePosition().y;
+    applyPelvisDeltaWorldY(S.pelvisDeltaY);
+    const p2y=S.pelvis.getAbsolutePosition().y;
+
+    const resL=solveLegOverlay(S.legs.L,tgtYL,animAnkleYL,blendL,mixLX,mixLZ);
+    const resR=solveLegOverlay(S.legs.R,tgtYR,animAnkleYR,blendR,mixRX,mixRZ);
+
+    orientFootFromToe(S.legs.L,blendL,profile.ballRestOffsetL);
+    orientFootFromToe(S.legs.R,blendR,profile.ballRestOffsetR);
+
+    // HUD
+    setH("d_pred",S.predictive?"ON":"OFF",S.predictive?"on":"off");
+    setH("d_animxz",`${nf(animAnkleXL,2)},${nf(animAnkleZL,2)} / ${nf(animAnkleXR,2)},${nf(animAnkleZR,2)}`);
+
+    const landTxt=(L)=>{
+      if(!L || !L.valid) return "—";
+      let tag="↗";
+      if(L.locked) tag="🔒";
+      else if(S.legs.L.blendSmooth>=PRED_COMMIT_BLEND || S.legs.R.blendSmooth>=PRED_COMMIT_BLEND) tag="◐";
+      return `${tag} (${nf(L.x,2)}, ${nf(L.y,2)}, ${nf(L.z,2)})`;
+    };
+    setH("d_landL",landTxt(landL), landL&&landL.valid?(landL.locked?"ok":""):"");
+    setH("d_landR",landTxt(landR), landR&&landR.valid?(landR.locked?"ok":""):"");
+
+    const ikOffL=Math.hypot(mixLX-animAnkleXL,mixLZ-animAnkleZL);
+    const ikOffR=Math.hypot(mixRX-animAnkleXR,mixRZ-animAnkleZR);
+    setH("d_ikxz",`${nf(ikOffL*100,1)} / ${nf(ikOffR*100,1)} cm`,
+      (ikOffL>0.05||ikOffR>0.05)?"ok":"");
+
+    setH("d_heel",`${nf(heelYL,3)} / ${nf(heelYR,3)}`);
+    const toePL=S.legs.L.toePenetr*100;
+    const toePR=S.legs.R.toePenetr*100;
+    setH("d_toe",`${nf(-toePL,1)} / ${nf(-toePR,1)} cm`,
+      (toePL<-0.5||toePR<-0.5)?"err":((toePL<0.5&&toePR<0.5)?"ok":""));
+    setH("d_fp",`L: ${nf(S.legs.L.appliedPitchDeg,1)}° / R: ${nf(S.legs.R.appliedPitchDeg,1)}°`);
+
+    const fmt=(res,rawB)=>{
+      if(res.beta0===null) return `— · blend=${nf(res.blend)} (raw ${nf(rawB)}) · MISS`;
+      return `${nf(res.lift)} · ${nf(res.blend)} (${nf(rawB)}) · β=${nf(radToDeg(res.betaApplied),0)}°`;
+    };
+    setH("d_hl",fmt(resL,rawBlendL),resL.blend>0.5?"ok":"warn");
+    setH("d_hr",fmt(resR,rawBlendR),resR.blend>0.5?"ok":"warn");
+
+    setH("d_rg",`${nf(profile.restAnkleOffsetL,3)} / ${nf(profile.restAnkleOffsetR,3)}`);
+    setH("d_rb",`${nf(profile.ballRestOffsetL,3)} / ${nf(profile.ballRestOffsetR,3)}`);
+
+    setH("d_dy",`${nf(pelvisTarget,3)} / ${nf(S.pelvisDeltaY,3)}`);
+    setH("d_p1",`${nf(p1y,3)} → ${nf(p2y,3)}`,(p2y>p1y-0.0005)?"ok":"warn");
+  }catch(err){
+    if(!S._errShown){
+      S._errShown=true;
+      console.error("[IK onAfter] error:",err.message,"\n",err.stack);
+      showErr("IK onAfter: "+err.message);
+    }
+  }
+});
+
+engine.runRenderLoop(()=>{
+  const now=performance.now();
+  frameDt=Math.min(0.05,(now-lastTime)/1000);
+  lastTime=now;
+  if(S.loaded&&S.root){
+    const mode=animMode(S.currentAnim);
+    const baseSpeed=(mode in MODE_SPEED)?MODE_SPEED[mode]:0.8;
+    const pulseEnabled=PULSE_ENABLED_MODES.has(mode)&&baseSpeed>0;
+    const batchActive=S.batchCalib&&S.batchCalib.active;
+
+    let pulse=1,phaseNow=0;
+    if(pulseEnabled && S.gaitPhaseStart>0 && S.gaitCycleDur>0.2){
+      const elapsed=now/1000-S.gaitPhaseStart;
+      phaseNow=((S.gaitPhase+elapsed/S.gaitCycleDur)%1+1)%1;
+      pulse=1-GAIT_SPEED_K*Math.cos(4*Math.PI*phaseNow);
+    }
+    const effectiveSpeed=baseSpeed*pulse;
+
+    const prevX=S.root.position.x,prevZ=S.root.position.z;
+    if(S.autoWalk && !batchActive && effectiveSpeed>0){
+      S.root.position.x+=effectiveSpeed*frameDt;
+      if(S.root.position.x>S.autoEnd) S.root.position.x=S.autoStart;
+    }
+    const rawVX=(S.root.position.x-prevX)/Math.max(frameDt,1e-5);
+    const rawVZ=(S.root.position.z-prevZ)/Math.max(frameDt,1e-5);
+    const kV=dampFactor(frameDt,0.10);
+    S.rootVelSmooth.x+=(rawVX-S.rootVelSmooth.x)*kV;
+    S.rootVelSmooth.z+=(rawVZ-S.rootVelSmooth.z)*kV;
+    S.rootVel.x=rawVX;
+    S.rootVel.z=rawVZ;
+
+    if(mode!=="none"){
+      setH("d_gp",`phase ${nf(phaseNow)} · pulse ${pulseEnabled?nf(pulse)+"×":"off"}`);
+      setH("d_rv",`${nf(S.rootVelSmooth.x,2)}, ${nf(S.rootVelSmooth.z,2)} m/s`);
+    }
+
+    S.root.rotationQuaternion=BABYLON.Quaternion.RotationYawPitchRoll(S.yaw,0,0);
+    const kCam=dampFactor(frameDt,0.10);
+    camera.target.x+=(S.root.position.x-camera.target.x)*kCam;
+    camera.target.z+=(S.root.position.z-camera.target.z)*kCam;
+    camera.target.y+=(1.0-camera.target.y)*kCam;
+  }
+  scene.render();
+});
+
+window.addEventListener("keydown",e=>{
+  if(e.target&&(e.target.tagName==="INPUT"||e.target.tagName==="TEXTAREA")) return;
+  if(e.key.toLowerCase()==="h"){toggleUI();e.preventDefault();return;}
+  if(e.key===" "||e.code==="Space"){
+    if(!(S.batchCalib&&S.batchCalib.active)) S.autoWalk=!S.autoWalk;
+    e.preventDefault();
+  }
+  else if(e.key.toLowerCase()==="p"){
+    btnPredToggle.click();
+    e.preventDefault();
+  }
+  else if(e.key.toLowerCase()==="r"){
+    if(S.root){
+      S.root.position.x=S.autoStart;S.root.position.z=0;
+      S.pelvisDeltaY=0;S.pelvisDeltaYSmooth=0;
+      S.profiles.clear();S.defaultProfile=null;S.pendingCalib=null;S.batchCalib=null;
+      S._errShown=false;
+      S.gaitPhase=0;S.gaitPhaseStart=performance.now()/1000;S.gaitCycleDur=1.2;
+      S.rootVel={x:0,z:0};S.rootVelSmooth={x:0,z:0};
+      for(const side of ['L','R']){
+        const l=S.legs[side];if(!l) continue;
+        l.blendSmooth=0;l.toeGroundYSmooth=null;l.toePenetr=0;
+        l.landing=mkLanding();
+      }
+      hideCalibBanner();
+      updateCalibCountHud();
+      refreshAnimButtonMarks();
+      setH("d_cst","reset","warn");
+      if(errbar) errbar.style.display="none";
+      if(autoCalCheckbox && autoCalCheckbox.checked){
+        S.autoWalk=false;
+        startBatchCalibration();
+      } else {
+        S.autoWalk=true;
+      }
+    }
+  }
+});
+window.addEventListener("resize",()=>engine.resize());
+window.addEventListener("dragover",e=>e.preventDefault());
+window.addEventListener("drop",e=>e.preventDefault());
+
+})();
+</script>
+</body>
+</html>

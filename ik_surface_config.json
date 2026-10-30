@@ -1,0 +1,90 @@
+{
+  "attractionPower": 4,
+  "points": [
+    {
+      "name": "toleft",
+      "rightHand": {
+        "x": 0,
+        "y": 1.07,
+        "z": 0.205
+      },
+      "gripOffset": {
+        "x": 0.225,
+        "y": 0.005,
+        "z": 0.01
+      },
+      "leftBendAxis": "0,0,1",
+      "rightBendAxis": "-1,0,0",
+      "leftPoleAngle": 0.4,
+      "rightPoleAngle": 0.25
+    },
+    {
+      "name": "down",
+      "rightHand": {
+        "x": -0.165,
+        "y": 0.57,
+        "z": 0.12
+      },
+      "gripOffset": {
+        "x": -0.03,
+        "y": -0.13,
+        "z": 0.19
+      },
+      "leftBendAxis": "0,0,-1",
+      "rightBendAxis": "0,0,1",
+      "leftPoleAngle": 3.15,
+      "rightPoleAngle": 0
+    },
+    {
+      "name": "toright",
+      "rightHand": {
+        "x": -0.355,
+        "y": 1.235,
+        "z": -0.1
+      },
+      "gripOffset": {
+        "x": 0.185,
+        "y": 0.07,
+        "z": -0.025
+      },
+      "leftBendAxis": "1,0,0",
+      "rightBendAxis": "0,0,1",
+      "leftPoleAngle": 0,
+      "rightPoleAngle": 0
+    },
+    {
+      "name": "neutral",
+      "rightHand": {
+        "x": -0.265,
+        "y": 1.205,
+        "z": 0.19372
+      },
+      "gripOffset": {
+        "x": -0.08,
+        "y": 0.14,
+        "z": 0.1
+      },
+      "leftBendAxis": "0,0,1",
+      "rightBendAxis": "0,0,1",
+      "leftPoleAngle": 0,
+      "rightPoleAngle": 0
+    },
+    {
+      "name": "up",
+      "rightHand": {
+        "x": -0.195,
+        "y": 1.61,
+        "z": 0.19
+      },
+      "gripOffset": {
+        "x": 0.08,
+        "y": 0.085,
+        "z": -0.1
+      },
+      "leftBendAxis": "1,0,0",
+      "rightBendAxis": "0,0,1",
+      "leftPoleAngle": 1.55,
+      "rightPoleAngle": 5.3
+    }
+  ]
+}

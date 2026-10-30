@@ -1,0 +1,227 @@
+{
+  "version": 2,
+  "model": "exported-model (5).glb",
+  "exportedAt": "2026-10-26T11:40:56.664Z",
+  "profiles": {
+    "Idle_A": {
+      "restAnkleOffsetL": 0.0933193564414978,
+      "restAnkleOffsetR": 0.09356210380792618,
+      "minAnkleYL": 0.0933193564414978,
+      "minAnkleYR": 0.09356210380792618,
+      "swingAmpL": 0.02,
+      "swingAmpR": 0.02,
+      "ballRestOffsetL": 0.0004550960729829967,
+      "ballRestOffsetR": 0.001028643804602325,
+      "restGroundY": 0
+    },
+    "Idle_Subtle": {
+      "restAnkleOffsetL": 0.09795203059911728,
+      "restAnkleOffsetR": 0.09522993117570877,
+      "minAnkleYL": 0.09795203059911728,
+      "minAnkleYR": 0.09522993117570877,
+      "swingAmpL": 0.02,
+      "swingAmpR": 0.02,
+      "ballRestOffsetL": 0.015187614597380161,
+      "ballRestOffsetR": 0.008376332931220531,
+      "restGroundY": 0
+    },
+    "Idle_Sword": {
+      "restAnkleOffsetL": 0.09452767670154572,
+      "restAnkleOffsetR": 0.09466101974248886,
+      "minAnkleYL": 0.09452767670154572,
+      "minAnkleYR": 0.09466101974248886,
+      "swingAmpL": 0.02,
+      "swingAmpR": 0.02,
+      "ballRestOffsetL": 0.0021472983062267303,
+      "ballRestOffsetR": 0.0021471281070262194,
+      "restGroundY": 0
+    },
+    "Idle_Hurt": {
+      "restAnkleOffsetL": 0.10462601482868195,
+      "restAnkleOffsetR": 0.095709428191185,
+      "minAnkleYL": 0.10462601482868195,
+      "minAnkleYR": 0.095709428191185,
+      "swingAmpL": 0.02,
+      "swingAmpR": 0.02,
+      "ballRestOffsetL": 0.02186165750026703,
+      "ballRestOffsetR": 0.012945137917995453,
+      "restGroundY": 0
+    },
+    "Walk": {
+      "restAnkleOffsetL": 0.09347261488437653,
+      "restAnkleOffsetR": 0.09370172023773193,
+      "minAnkleYL": 0.09347261488437653,
+      "minAnkleYR": 0.09370172023773193,
+      "swingAmpL": 0.2442903369665146,
+      "swingAmpR": 0.24403396248817444,
+      "ballRestOffsetL": 0.00042730881250463426,
+      "ballRestOffsetR": 0.00034356702235527337,
+      "restGroundY": 0
+    },
+    "Walk_Female": {
+      "restAnkleOffsetL": 0.09933636337518692,
+      "restAnkleOffsetR": 0.09771132469177246,
+      "minAnkleYL": 0.09933636337518692,
+      "minAnkleYR": 0.09771132469177246,
+      "swingAmpL": 0.17942439764738083,
+      "swingAmpR": 0.15758362412452698,
+      "ballRestOffsetL": 0.008989245630800724,
+      "ballRestOffsetR": 0.001722885761409998,
+      "restGroundY": 0
+    },
+    "Walk_Formal": {
+      "restAnkleOffsetL": 0.09356047213077545,
+      "restAnkleOffsetR": 0.0942169576883316,
+      "minAnkleYL": 0.09356047213077545,
+      "minAnkleYR": 0.0942169576883316,
+      "swingAmpL": 0.2431490570306778,
+      "swingAmpR": 0.2425088733434677,
+      "ballRestOffsetL": 0.00013400115130934864,
+      "ballRestOffsetR": 0.00023311469703912735,
+      "restGroundY": 0
+    },
+    "Walk_Backwards": {
+      "restAnkleOffsetL": 0.0968354269862175,
+      "restAnkleOffsetR": 0.09773201495409012,
+      "minAnkleYL": 0.0968354269862175,
+      "minAnkleYR": 0.09773201495409012,
+      "swingAmpL": 0.15030383318662643,
+      "swingAmpR": 0.15959935635328293,
+      "ballRestOffsetL": 0.014072712510824203,
+      "ballRestOffsetR": 0.014962788671255112,
+      "restGroundY": 0
+    },
+    "Walk_Large": {
+      "restAnkleOffsetL": 0.09558246284723282,
+      "restAnkleOffsetR": 0.09875382483005524,
+      "minAnkleYL": 0.09558246284723282,
+      "minAnkleYR": 0.09875382483005524,
+      "swingAmpL": 0.1887306496500969,
+      "swingAmpR": 0.2137746661901474,
+      "ballRestOffsetL": 0.008786494843661785,
+      "ballRestOffsetR": 0.0032630236819386482,
+      "restGroundY": 0
+    },
+    "Walk_Stealth": {
+      "restAnkleOffsetL": 0.1051425114274025,
+      "restAnkleOffsetR": 0.09939524531364441,
+      "minAnkleYL": 0.1051425114274025,
+      "minAnkleYR": 0.09939524531364441,
+      "swingAmpL": 0.15078695863485336,
+      "swingAmpR": 0.16515538096427917,
+      "ballRestOffsetL": 0.01664772257208824,
+      "ballRestOffsetR": 0.007927816361188889,
+      "restGroundY": 0
+    },
+    "Run_Female": {
+      "restAnkleOffsetL": 0.09092863649129868,
+      "restAnkleOffsetR": 0.09061220288276672,
+      "minAnkleYL": 0.09092863649129868,
+      "minAnkleYR": 0.09061220288276672,
+      "swingAmpL": 0.6140339151024818,
+      "swingAmpR": 0.5954205691814423,
+      "ballRestOffsetL": 0.018391763791441917,
+      "ballRestOffsetR": 0.003799302037805319,
+      "restGroundY": 0
+    },
+    "Run_Anime": {
+      "restAnkleOffsetL": 0.08758988231420517,
+      "restAnkleOffsetR": 0.0846000462770462,
+      "minAnkleYL": 0.08758988231420517,
+      "minAnkleYR": 0.0846000462770462,
+      "swingAmpL": 0.49226269870996475,
+      "swingAmpR": 0.4965992420911789,
+      "ballRestOffsetL": 0,
+      "ballRestOffsetR": 0.008273047395050526,
+      "restGroundY": 0
+    },
+    "Jog": {
+      "restAnkleOffsetL": 0.11239073425531387,
+      "restAnkleOffsetR": 0.10846494138240814,
+      "minAnkleYL": 0.11239073425531387,
+      "minAnkleYR": 0.10846494138240814,
+      "swingAmpL": 0.40802814811468124,
+      "swingAmpR": 0.4009801894426346,
+      "ballRestOffsetL": 0,
+      "ballRestOffsetR": 0,
+      "restGroundY": 0
+    },
+    "Sprint": {
+      "restAnkleOffsetL": 0.09194512665271759,
+      "restAnkleOffsetR": 0.1134236678481102,
+      "minAnkleYL": 0.09194512665271759,
+      "minAnkleYR": 0.1134236678481102,
+      "swingAmpL": 0.4329938143491745,
+      "swingAmpR": 0.2716272845864296,
+      "ballRestOffsetL": 0,
+      "ballRestOffsetR": 0,
+      "restGroundY": 0
+    },
+    "Crouch_Idle": {
+      "restAnkleOffsetL": 0.1005401462316513,
+      "restAnkleOffsetR": 0.1824388951063156,
+      "minAnkleYL": 0.1005401462316513,
+      "minAnkleYR": 0.1824388951063156,
+      "swingAmpL": 0.02,
+      "swingAmpR": 0.02,
+      "ballRestOffsetL": 0.007790077943354845,
+      "ballRestOffsetR": 0.0028884990606456995,
+      "restGroundY": 0
+    },
+    "Crouch_Walk": {
+      "restAnkleOffsetL": 0.0985073372721672,
+      "restAnkleOffsetR": 0.09735023975372314,
+      "minAnkleYL": 0.0985073372721672,
+      "minAnkleYR": 0.09735023975372314,
+      "swingAmpL": 0.07779990881681442,
+      "swingAmpR": 0.10421484708786011,
+      "ballRestOffsetL": 0.0029865961987525225,
+      "ballRestOffsetR": 0.002975907875224948,
+      "restGroundY": 0
+    },
+    "Strafe_left": {
+      "restAnkleOffsetL": 0.09796492755413055,
+      "restAnkleOffsetR": 0.09464354813098907,
+      "minAnkleYL": 0.09796492755413055,
+      "minAnkleYR": 0.09464354813098907,
+      "swingAmpL": 0.14797815680503845,
+      "swingAmpR": 0.12257671356201172,
+      "ballRestOffsetL": 0.006158025003969669,
+      "ballRestOffsetR": 0.014502611942589283,
+      "restGroundY": 0
+    },
+    "Strafe_right": {
+      "restAnkleOffsetL": 0.09866766631603241,
+      "restAnkleOffsetR": 0.09806587547063828,
+      "minAnkleYL": 0.09866766631603241,
+      "minAnkleYR": 0.09806587547063828,
+      "swingAmpL": 0.11857187747955322,
+      "swingAmpR": 0.1478472575545311,
+      "ballRestOffsetL": 0.010909713804721832,
+      "ballRestOffsetR": 0,
+      "restGroundY": 0
+    },
+    "Slide": {
+      "restAnkleOffsetL": 0.1021551564335823,
+      "restAnkleOffsetR": 0.09028146415948868,
+      "minAnkleYL": 0.1021551564335823,
+      "minAnkleYR": 0.09028146415948868,
+      "swingAmpL": 0.02,
+      "swingAmpR": 0.02,
+      "ballRestOffsetL": 0.10197300463914871,
+      "ballRestOffsetR": 0.09806831926107407,
+      "restGroundY": 0
+    },
+    "Push": {
+      "restAnkleOffsetL": 0.09554675966501236,
+      "restAnkleOffsetR": 0.1216873973608017,
+      "minAnkleYL": 0.09554675966501236,
+      "minAnkleYR": 0.1216873973608017,
+      "swingAmpL": 0.025872953236103058,
+      "swingAmpR": 0.07384522259235382,
+      "ballRestOffsetL": 0,
+      "ballRestOffsetR": 0,
+      "restGroundY": 0
+    }
+  }
+}
