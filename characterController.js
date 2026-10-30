@@ -31,12 +31,26 @@
 //   • movement.js: inputLock / externalBias / externalSpeedLimit — подключение AI без переписывания кода.
 //   • healthSystem/staminaSystem: hook onRagdoll / onImpact для урона и выносливости.
 //   • krl.js: реакция-позы (блоки) могут подавать additional IK-targets через setHandTarget().
+//
+//  ИНТЕГРАЦИЯ DeepSeek-прототипов (мастер-слой):
+//   • deepseek_html_20261028_1c9eff.html — предиктивная посадка стопы (predictLandingXZ:
+//     экстраполяция XZ по скорости корня, 8-лучевой поиск вверх-уступа, commit/lock с
+//     гистерезисом, плавные константы времени dampFactor), калибровочный профиль локации
+//     (restAnkleOffset/minAnkleY/swingAmp/ballRestOffset/restGroundY → blend опоры),
+//     компенсация таза по посаженным стопам (pelvisDeltaY), пульс скорости шага GAIT_SPEED_K.
+//   • deepseek_html_20261028_644a29.html — градиентное поле анимаций (IDW-веса ключевых точек
+//     по осям fwd/side), ramp Walk→Run→Sprint, инерционный spring-constraint контакт стопы
+//     (decaySpringVec3 / contactUpdate), zone/slope множители скорости, onBeforeRender-перехват
+//     клипов мастера (заморозка скелета при ragdoll и масштабирование весов на followingScale).
+//   Профили калибровки подхватываются из «ik_calibration_<model>.json» (экспорт первого файла).
 // =================================================================================================
 
 // --------------------------------------------------------------------------- утилиты
 const clampF = (v, a, b) => (v < a ? a : v > b ? b : v);
 const lerpF = (a, b, t) => a + (b - a) * t;
 const smoothstep = (a, b, x) => { const t = clampF((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+// frame-rate independent damping (идея обоих DeepSeek-прототипов): коэффициент за кадр
+const dampF = (dt, tau) => 1 - Math.exp(-dt / Math.max(0.001, tau));
 
 function smoothDampAngle(cur, tgt, dt, smoothTime) {
     let d = tgt - cur;
@@ -88,6 +102,37 @@ export const DEFAULT_PARAMS = {
     linDamp: 0.1, angDamp: 0.4,
     // IK
     ikEnabled: true, ikFootLift: 0.05, ikSlerp: 0.9,
+
+    // ===== Master layer: ideas from deepseek_html_20261028_1c9eff.html =====
+    predictive: true,               // предиктивная посадка стопы (predictLandingXZ)
+    predRadius: 0.22,               // радиус 8-лучевого поиска опоры вокруг точки прицела
+    predMaxOffset: 0.30,            // максимальный сдвиг точки прицела от «анимационной» стопы
+    predInfluence: 0.85,            // вес landing-цели в фазе переноса
+    predInfluenceAtPlant: 1.0,      // вес цели после commit (стопу держим на месте)
+    predLockBlend: 0.85,            // blend ниже которого нельзя lock (фаза переноса)
+    predLockExit: 0.55,             // гистерезис выхода из lock
+    predCommitBlend: 0.70,          // blend, при котором landing «замораживается» по XZ (soft commit)
+    predHysteresis: 0.06,           // прилипание к текущей точке посадки (м/с), защита от дрожания
+    predRaiseThreshold: 0.04,       // насколько выше должен быть луч, чтобы сместить точку
+    predSmoothTauXZ: 0.10,          // τ сглаживания XZ
+    predSmoothTauY: 0.18,           // τ сглаживания Y (медленнее — вертикаль стабильнее)
+    gaitSpeedK: 0.20,               // пульс скорости мастера по фазе шага (GAIT_SPEED_K)
+
+    // ===== Master layer: ideas from deepseek_html_20261028_644a29.html =====
+    fieldSharpness: 2.5,            // острота IDW-поля градиента (sharpness)
+    fieldEps: 0.0001,               // защита от деления на ноль в IDW
+    rampUpTime: 8.0,                // ramp walk→run→sprint (s)
+    rampDownTime: 6.0,              // затухание ramp без ввода (s)
+    inputSmoothTau: 0.10,           // τ сглаживания вектора ввода
+    contactSpringHalfLife: 0.05,    // hl инерционного spring-контакта стопы
+    contactUnlockRadius: 0.15,      // ur — рассогласование, разрывающее lock контакта
+    masterClipWeightScale: true,    // масштабировать веса клипов мастера на followingScale
+    freezeMasterOnRagdoll: true,    // ragdoll → скелет мастера замораживается в rest-позе
+
+    // Компенсация таза по посаженным стопам (pelvisDeltaY):
+    pelvisCompensation: true,
+    pelvisTau: 0.14,                // τ сглаживания ΔY таза
+    pelvisPlantedBlend: 0.70,       // blend, начиная с которого стопа считается «посаженной»
 };
 
 // --------------------------------------------------------------------------- группы коллайдеров
